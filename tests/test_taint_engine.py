@@ -74,3 +74,15 @@ def test_no_false_positives_on_arbitrary_numbers():
     # Checksum fails, so no false positive Aadhaar
     aadhaar_matches = [d for d in detections if d.entity_type == "AADHAAR"]
     assert len(aadhaar_matches) == 0
+
+
+def test_space_split_card_detection():
+    engine = SessionTaintEngine()
+    text = "Hey Jeet Gorai Charge card 4992 7398716 for subscription renewal of $49.00."
+    messages = [{"role": "user", "content": text}]
+
+    detections = engine.process_messages("session_card_split", messages)
+    assert len(detections) >= 1
+    card_ent = [d for d in detections if d.entity_type == "CREDIT_CARD"][0]
+    assert "4992" in card_ent.raw_value
+    assert "7398716" in card_ent.raw_value

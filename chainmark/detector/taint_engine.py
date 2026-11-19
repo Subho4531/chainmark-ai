@@ -73,10 +73,12 @@ class SessionTaintEngine:
         """
         detections: List[DetectedEntity] = []
 
-        # 1. Aadhaar: 12 digits (with optional spaces or hyphens)
-        for match in re.finditer(r"\b\d{4}[-\s]?\d{4}[-\s]?\d{4}\b", text):
+        # 1. Structured Numeric IDs: Aadhaar (12 digits, Verhoeff) and Cards (11-19 digits, Luhn)
+        # Matches space/hyphen delimited groups or continuous digits
+        for match in re.finditer(r"\b\d{2,8}(?:[-\s]\d{2,8})+\b|\b\d{11,19}\b", text):
             candidate = match.group()
-            if validate_aadhaar(candidate):
+            cleaned = re.sub(r"\D", "", candidate)
+            if len(cleaned) == 12 and validate_aadhaar(cleaned):
                 detections.append(
                     DetectedEntity(
                         entity_type="AADHAAR",
@@ -85,27 +87,24 @@ class SessionTaintEngine:
                         span=match.span(),
                     )
                 )
-
-        # 2. PAN Card
-        for match in re.finditer(r"\b[A-Za-z]{5}[0-9]{4}[A-Za-z]{1}\b", text):
-            candidate = match.group()
-            if validate_pan(candidate):
+            elif 11 <= len(cleaned) <= 19 and validate_luhn(cleaned):
                 detections.append(
                     DetectedEntity(
-                        entity_type="PAN",
+                        entity_type="CREDIT_CARD",
                         raw_value=candidate,
                         confidence=1.0,
                         span=match.span(),
                     )
                 )
 
-        # 3. Credit / Debit Cards (13 to 19 digits with optional delimiters)
-        for match in re.finditer(r"\b(?:\d{4}[-\s]?){3}\d{1,7}\b", text):
+        # 2. PAN Card
+        for match in re.finditer(r"\b[A-Za-z]{5}[-\s]?[0-9]{4}[-\s]?[A-Za-z]{1}\b", text):
             candidate = match.group()
-            if validate_luhn(candidate):
+            cleaned_pan = re.sub(r"[-\s]", "", candidate)
+            if validate_pan(cleaned_pan):
                 detections.append(
                     DetectedEntity(
-                        entity_type="CREDIT_CARD",
+                        entity_type="PAN",
                         raw_value=candidate,
                         confidence=1.0,
                         span=match.span(),
@@ -171,10 +170,37 @@ class SessionTaintEngine:
 
         # Check for split Aadhaar: 2 or 3 fragments across different turns
         # e.g. Turn A has '4532', Turn B has '8901', Turn C has '2348'
-        # Total 12 digits!
         num_turns = len(turn_fragments)
         for i in range(num_turns):
             turn_i_idx, nums_i = turn_fragments[i]
+
+            # 1. Check combinations within the same turn
+            for a_idx, num_a in enumerate(nums_i):
+                for b_idx in range(a_idx + 1, len(nums_i)):
+                    num_b = nums_i[b_idx]
+                    joined_same = num_a + num_b
+                    if len(joined_same) == 12 and validate_aadhaar(joined_same):
+                        all_detections.append(
+                            DetectedEntity(
+                                entity_type="AADHAAR",
+                                raw_value=joined_same,
+                                confidence=1.0,
+                                is_fragment_assembly=True,
+                                provenance_turns=[turn_i_idx],
+                            )
+                        )
+                    elif 11 <= len(joined_same) <= 19 and validate_luhn(joined_same):
+                        all_detections.append(
+                            DetectedEntity(
+                                entity_type="CREDIT_CARD",
+                                raw_value=joined_same,
+                                confidence=1.0,
+                                is_fragment_assembly=True,
+                                provenance_turns=[turn_i_idx],
+                            )
+                        )
+
+            # 2. Check combinations across different turns
             for num_a in nums_i:
                 # 2-turn concatenation
                 for j in range(i + 1, num_turns):
@@ -207,12 +233,12 @@ class SessionTaintEngine:
                                         )
                                     )
 
-                # Check for split Credit Cards (15 or 16 digits)
+                # Check for split Credit Cards (11 to 19 digits)
                 for j in range(i + 1, num_turns):
                     turn_j_idx, nums_j = turn_fragments[j]
                     for num_b in nums_j:
                         joined_card = num_a + num_b
-                        if 13 <= len(joined_card) <= 19 and validate_luhn(joined_card):
+                        if 11 <= len(joined_card) <= 19 and validate_luhn(joined_card):
                             all_detections.append(
                                 DetectedEntity(
                                     entity_type="CREDIT_CARD",

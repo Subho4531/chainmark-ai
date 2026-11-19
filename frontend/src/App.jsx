@@ -15,8 +15,8 @@ const SAMPLES = [
     text: 'Tax return authorization granted for PAN ABCPE1234F under Section 139.',
   },
   {
-    label: 'Payment Card (Luhn)',
-    text: 'Charge card 49927398716 for subscription renewal of $49.00.',
+    label: 'Split Payment Card (Luhn)',
+    text: 'Hey Jeet Gorai Charge card 4992 7398716 for subscription renewal of $49.00.',
   },
   {
     label: 'Patient MRN (HIPAA)',

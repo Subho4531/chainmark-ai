@@ -126,10 +126,11 @@ class TokenVault:
             escaped = re.escape(raw_val)
             sanitized = re.sub(escaped, token_id, sanitized)
 
-            # Also replace normalized digits version if digits only
+            # If numeric (or assembled from split fragments), match spaced/hyphenated variations
             digits_only = re.sub(r"\D", "", raw_val)
-            if digits_only and digits_only != raw_val and len(digits_only) >= 10:
-                sanitized = re.sub(re.escape(digits_only), token_id, sanitized)
+            if digits_only and len(digits_only) >= 9:
+                spaced_pat = r"\b" + r"[-\s]*".join(list(digits_only)) + r"\b"
+                sanitized = re.sub(spaced_pat, token_id, sanitized)
 
         return sanitized, token_replacements
 
