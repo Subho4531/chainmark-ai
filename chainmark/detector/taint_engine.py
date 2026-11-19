@@ -52,10 +52,17 @@ class SessionTaintEngine:
     def _extract_candidate_fragments(self, text: str) -> Tuple[List[str], List[str]]:
         """
         Extracts sub-threshold numeric and alphanumeric fragments from text.
-        e.g., 4-digit chunks like '4532', '8901', '2348', or 'AADH-4532'.
+        e.g., 4-digit chunks like '4532', '8901', '2348', or hyphenated '4567-8901'.
         """
-        # Numeric sequences between 3 and 10 digits
+        # Standalone numeric sequences between 3 and 10 digits
         num_matches = re.findall(r"\b\d{3,10}\b", text)
+        
+        # Also extract hyphenated or spaced chunks (e.g. '4567-8901' -> '45678901')
+        for chunk in re.findall(r"\b\d{4}[-\s]\d{4}\b", text):
+            cleaned = re.sub(r"\D", "", chunk)
+            if cleaned not in num_matches:
+                num_matches.append(cleaned)
+                
         # Alphanumeric sequences (e.g. PAN fragments)
         alpha_matches = re.findall(r"\b[A-Z0-9]{3,8}\b", text, re.IGNORECASE)
         return num_matches, alpha_matches

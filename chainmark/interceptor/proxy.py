@@ -12,6 +12,7 @@ import hashlib
 import time
 import httpx
 from fastapi import FastAPI, Request, Response, HTTPException, status
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 import uvicorn
 
@@ -26,6 +27,15 @@ app = FastAPI(
     title="Chainmark AI Gateway",
     description="Cryptographic guard and evidence layer for autonomous AI agents",
     version="0.1.0",
+)
+
+# Enable CORS for local React dashboard
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # Global runtime services (scoped in memory for Phase 1)
@@ -343,6 +353,183 @@ async def verify_session_evidence(session_id: str):
         "merkle_root": root_hash,
         "signature": sig,
         "public_key": signer.get_public_key_pem(),
+    }
+
+
+@app.get("/api/sessions")
+async def list_sessions():
+    """
+    Returns active sessions and compliance summary for the dashboard.
+    """
+    sessions_list = []
+    for sid, chain in session_chains.items():
+        if not chain or not chain.events:
+            continue
+        entities = set()
+        for e in chain.events:
+            entities.update(e.entities_detected)
+        
+        is_valid, _ = chain.verify_chain()
+        sessions_list.append({
+            "session_id": sid,
+            "event_count": len(chain.events),
+            "merkle_root": chain.get_merkle_root(),
+            "last_active": chain.events[-1].timestamp if chain.events else 0,
+            "entities_detected": sorted(list(entities)),
+            "tamper_evident_valid": is_valid,
+        })
+    return sorted(sessions_list, key=lambda x: x["last_active"], reverse=True)
+
+
+@app.get("/api/sessions/{session_id}")
+async def get_session_detail(session_id: str):
+    """
+    Returns detailed event chain and Merkle DAG for an individual session.
+    """
+    chain = session_chains.get(session_id)
+    if not chain:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    is_valid, err = chain.verify_chain()
+    events_data = []
+    for e in chain.events:
+        events_data.append({
+            "sequence": e.sequence,
+            "timestamp": e.timestamp,
+            "event_type": e.event_type,
+            "input_digest": e.input_digest,
+            "sanitized_digest": e.sanitized_digest,
+            "entities_detected": e.entities_detected,
+            "tokens_mapped": e.tokens_mapped,
+            "policy_action": e.policy_action,
+            "prev_hash": e.prev_hash,
+            "node_hash": e.node_hash,
+        })
+        
+    return {
+        "session_id": session_id,
+        "is_valid": is_valid,
+        "error": err,
+        "merkle_root": chain.get_merkle_root(),
+        "signature": signer.sign_root(chain.get_merkle_root()),
+        "events": events_data,
+    }
+
+
+@app.post("/api/simulate")
+async def simulate_prompt(request: Request):
+    """
+    Simulates a live multi-turn agent interaction for the UI playground.
+    Allows comparing 'Protected (Chainmark)' vs 'Unprotected (Raw LLM)'.
+    """
+    data = await request.json()
+    session_id = data.get("session_id", "demo_simulation")
+    messages = data.get("messages", [])
+    protected = data.get("protected", True)
+    
+    chain = get_or_create_chain(session_id)
+    
+    # 1. Detection
+    detected_entities = taint_engine.process_messages(session_id, messages)
+    
+    if not protected:
+        # In unprotected mode, raw PII leaks to external LLM
+        return {
+            "mode": "UNPROTECTED_DIRECT_EGRESS",
+            "detected_entities": [
+                {
+                    "entity_type": e.entity_type,
+                    "raw_value": e.raw_value,
+                    "is_fragment_assembly": e.is_fragment_assembly,
+                    "provenance_turns": e.provenance_turns,
+                }
+                for e in detected_entities
+            ],
+            "egress_payload": messages,
+            "data_leaked": len(detected_entities) > 0,
+            "simulated_llm_response": f"External LLM processed raw prompt: {messages[-1].get('content', '') if messages else ''}",
+            "audit_trail_recorded": False,
+        }
+    
+    # Protected mode
+    sanitized_messages = []
+    all_tokens = []
+    for msg in messages:
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            redacted, tokens = vault.redact_text(content, detected_entities, session_id)
+            msg_copy = dict(msg)
+            msg_copy["content"] = redacted
+            sanitized_messages.append(msg_copy)
+            all_tokens.extend([t[0] for t in tokens])
+        else:
+            sanitized_messages.append(msg)
+            
+    # Record in Merkle chain
+    chain.append_event(
+        event_type="SIMULATION_PROMPT_EGRESS",
+        raw_input=json.dumps(messages, sort_keys=True),
+        sanitized_output=json.dumps(sanitized_messages, sort_keys=True),
+        entities_detected=[e.entity_type for e in detected_entities],
+        tokens_mapped=all_tokens,
+        policy_action="TOKENIZE_AND_FORWARD" if detected_entities else "ALLOW",
+    )
+    
+    # Simulate LLM answering using the token
+    last_sanitized = sanitized_messages[-1].get("content", "") if sanitized_messages else ""
+    simulated_llm_raw = f"Verified identity record for {last_sanitized}. Status: Cleared for processing."
+    detokenized_final = vault.detokenize_text(simulated_llm_raw, session_id)
+    
+    chain.append_event(
+        event_type="SIMULATION_COMPLETION_INGRESS",
+        raw_input=simulated_llm_raw,
+        sanitized_output=detokenized_final,
+        entities_detected=[],
+        tokens_mapped=[],
+        policy_action="DETOKENIZE_FOR_CLIENT",
+    )
+    
+    return {
+        "mode": "CHAINMARK_PROTECTED",
+        "detected_entities": [
+            {
+                "entity_type": e.entity_type,
+                "raw_value": e.raw_value,
+                "is_fragment_assembly": e.is_fragment_assembly,
+                "provenance_turns": e.provenance_turns,
+            }
+            for e in detected_entities
+        ],
+        "egress_payload": sanitized_messages,
+        "tokens_generated": all_tokens,
+        "simulated_llm_raw": simulated_llm_raw,
+        "detokenized_client_response": detokenized_final,
+        "merkle_root": chain.get_merkle_root(),
+        "total_events": len(chain.events),
+        "data_leaked": False,
+        "audit_trail_recorded": True,
+    }
+
+
+@app.post("/api/tamper/{session_id}")
+async def tamper_session(session_id: str):
+    """
+    Demo endpoint: artificially corrupts a hash in the chain to demonstrate
+    how the Merkle DAG immediately catches tampering.
+    """
+    chain = session_chains.get(session_id)
+    if not chain or not chain.events:
+        raise HTTPException(status_code=404, detail="Session not found or has no events")
+    
+    # Corrupt node_hash of the first event
+    chain.events[0].node_hash = "deadbeef" * 8
+    is_valid, err = chain.verify_chain()
+    
+    return {
+        "tampered": True,
+        "session_id": session_id,
+        "is_valid": is_valid,
+        "detected_error": err,
     }
 
 
