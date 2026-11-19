@@ -5,15 +5,18 @@ tokenizes sensitive entities via AES-256-GCM vault, forwards sanitized prompts,
 detokenizes responses on the fly, and seals the transaction in an immutable Merkle DAG.
 """
 
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 import os
 import json
 import hashlib
 import time
+import secrets
+import re
 import httpx
 from fastapi import FastAPI, Request, Response, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
 import uvicorn
 
 from chainmark.core.config import settings
@@ -530,6 +533,103 @@ async def tamper_session(session_id: str):
         "session_id": session_id,
         "is_valid": is_valid,
         "detected_error": err,
+    }
+
+
+class CloakRequest(BaseModel):
+    text: str
+    cloak_request_id: Optional[str] = None
+    history: Optional[List[Dict[str, Any]]] = None
+
+
+class UncloakRequest(BaseModel):
+    cloaked_text: Optional[str] = None
+    cloak_request_id: Optional[str] = None
+
+
+@app.post("/cloak")
+@app.post("/v1/cloak")
+async def handle_cloak(payload: CloakRequest):
+    """
+    Parses input text, detects sensitive entities and split multi-turn fragments,
+    replaces them with typed HMAC tokens, stores encrypted values in the vault,
+    and commits an event to the Merkle DAG.
+    """
+    req_id = payload.cloak_request_id or f"cloak_{secrets.token_hex(6)}"
+    chain = get_or_create_chain(req_id)
+
+    scan_messages = list(payload.history or []) + [{"role": "user", "content": payload.text}]
+    detected_entities = taint_engine.process_messages(req_id, scan_messages)
+
+    cloaked_text, tokens = vault.redact_text(payload.text, detected_entities, req_id)
+    tokens_mapped = [t[0] for t in tokens]
+
+    chain.append_event(
+        event_type="CLOAK_OPERATION",
+        raw_input=payload.text,
+        sanitized_output=cloaked_text,
+        entities_detected=[e.entity_type for e in detected_entities],
+        tokens_mapped=tokens_mapped,
+        policy_action="CLOAKED_WITH_TOKENS" if detected_entities else "PASSTHROUGH",
+    )
+
+    return {
+        "status": "success",
+        "cloak_request_id": req_id,
+        "original_text": payload.text,
+        "cloaked_text": cloaked_text,
+        "detected_entities": [
+            {
+                "entity_type": e.entity_type,
+                "raw_value": e.raw_value,
+                "token": vault.tokenize_value(e.entity_type, e.raw_value, req_id),
+                "confidence": e.confidence,
+                "is_fragment_assembly": e.is_fragment_assembly,
+                "provenance_turns": e.provenance_turns,
+            }
+            for e in detected_entities
+        ],
+        "tokens_mapped": tokens_mapped,
+        "merkle_root": chain.get_merkle_root(),
+        "event_sequence": len(chain.events) - 1,
+    }
+
+
+@app.post("/uncloak/{cloakrequestid}")
+@app.get("/uncloak/{cloakrequestid}")
+@app.post("/uncloak")
+async def handle_uncloak(cloakrequestid: Optional[str] = None, payload: Optional[UncloakRequest] = None):
+    """
+    Restores tokens in cloaked text back to original plaintext using the AES-256 vault.
+    """
+    req_id = cloakrequestid or (payload.cloak_request_id if payload else None)
+    if not req_id:
+        raise HTTPException(status_code=400, detail="Missing cloak_request_id")
+
+    chain = get_or_create_chain(req_id)
+    text_to_uncloak = payload.cloaked_text if payload and payload.cloaked_text is not None else ""
+
+    uncloaked_text = vault.detokenize_text(text_to_uncloak, req_id)
+    token_pattern = re.compile(r"\[CM_TOKEN_[A-Z_]+_[a-f0-9]{8}\]")
+    tokens_restored = len(token_pattern.findall(text_to_uncloak))
+
+    chain.append_event(
+        event_type="UNCLOAK_OPERATION",
+        raw_input=text_to_uncloak,
+        sanitized_output=uncloaked_text,
+        entities_detected=[],
+        tokens_mapped=[],
+        policy_action="UNCLOAKED_FOR_CLIENT",
+    )
+
+    return {
+        "status": "success",
+        "cloak_request_id": req_id,
+        "cloaked_text": text_to_uncloak,
+        "uncloaked_text": uncloaked_text,
+        "tokens_restored_count": tokens_restored,
+        "merkle_root": chain.get_merkle_root(),
+        "event_sequence": len(chain.events) - 1,
     }
 
 

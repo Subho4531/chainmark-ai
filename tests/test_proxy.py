@@ -154,3 +154,76 @@ async def test_evidence_export_endpoint():
         assert "manifest.json" in zf.namelist()
         assert "events.jsonl" in zf.namelist()
         assert "signature.sig" in zf.namelist()
+
+
+@pytest.mark.asyncio
+async def test_cloak_and_uncloak_endpoints():
+    base = "45678901234"
+    check = generate_verhoeff_checksum(base)
+    valid_aadhaar = f"{base}{check}"
+    raw_pan = "ABCPE1234F"
+
+    raw_text = f"Customer has Aadhaar {valid_aadhaar} and PAN {raw_pan}."
+    cloak_id = "test_cloak_roundtrip"
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+        # 1. Test /cloak
+        cloak_resp = await ac.post(
+            "/cloak",
+            json={"text": raw_text, "cloak_request_id": cloak_id},
+        )
+        assert cloak_resp.status_code == 200
+        cloak_data = cloak_resp.json()
+
+        assert cloak_data["status"] == "success"
+        assert cloak_data["cloak_request_id"] == cloak_id
+        cloaked_text = cloak_data["cloaked_text"]
+
+        assert valid_aadhaar not in cloaked_text
+        assert raw_pan not in cloaked_text
+        assert "[CM_TOKEN_AADHAAR_" in cloaked_text
+        assert "[CM_TOKEN_PAN_" in cloaked_text
+        assert len(cloak_data["tokens_mapped"]) == 2
+
+        # 2. Test /uncloak/{cloakrequestid}
+        uncloak_resp = await ac.post(
+            f"/uncloak/{cloak_id}",
+            json={"cloaked_text": cloaked_text},
+        )
+        assert uncloak_resp.status_code == 200
+        uncloak_data = uncloak_resp.json()
+
+        assert uncloak_data["status"] == "success"
+        assert uncloak_data["uncloaked_text"] == raw_text
+        assert uncloak_data["tokens_restored_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_cloak_with_multi_turn_history():
+    base = "45678901234"
+    check = generate_verhoeff_checksum(base)
+    valid_aadhaar = f"{base}{check}"
+
+    part1 = valid_aadhaar[:8]  # 8 digits
+    part2 = valid_aadhaar[8:]  # 4 digits
+
+    cloak_id = "test_cloak_history"
+    history = [{"role": "user", "content": f"Aadhaar prefix is {part1}"}]
+    incoming = f"and the remaining digits are {part2}"
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+        res = await ac.post(
+            "/cloak",
+            json={
+                "text": incoming,
+                "cloak_request_id": cloak_id,
+                "history": history,
+            },
+        )
+        assert res.status_code == 200
+        data = res.json()
+        assert len(data["detected_entities"]) >= 1
+        aadhaar_ent = [e for e in data["detected_entities"] if e["entity_type"] == "AADHAAR"][0]
+        assert aadhaar_ent["is_fragment_assembly"] is True
