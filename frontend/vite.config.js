@@ -8,6 +8,14 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
+      '/cloak': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
+      '/uncloak': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
       '/api': {
         target: 'http://localhost:8000',
         changeOrigin: true,
