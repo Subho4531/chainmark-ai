@@ -1,0 +1,5 @@
+ClinicalTrials.gov Data License & Terms Notification
+Timestamp: 2026-11-19T22:46:50+05:30
+Notice: Clinical trial data retrieved via ClinicalTrials.gov API v2.
+Users are advised to check the terms and conditions at https://clinicaltrials.gov/
+Data is subject to National Library of Medicine (NLM) and NIH terms of service.

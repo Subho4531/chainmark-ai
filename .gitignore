@@ -1,0 +1,39 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Environment variables & sensitive keys
+.env
+*.pem
+*.key
+*.sig
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+
+# Unit test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local database / vault files
+*.db
+*.sqlite3
+
+# Scratch & temporary JSON files
+ai_trials.json
+count_chatbot.json
+evidence_pack*.zip
+
+# OS artifacts
+.DS_Store
+Thumbs.db
