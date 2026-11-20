@@ -1352,11 +1352,6 @@
     gap: 12px;
   }
 
-  .brand-mark {
-    width: 30px;
-    height: 30px;
-  }
-
   .brand-word {
     font-size: 15px;
     letter-spacing: 0.11em;
@@ -1964,8 +1959,10 @@ section[id] {
 }
 
 .scan-hub-node img {
+  display: block;
   width: 38px;
   height: 38px;
+  object-fit: contain;
   opacity: 0.95;
   filter: drop-shadow(0 0 12px rgba(255, 87, 26, 0.35));
 }
@@ -3258,6 +3255,8 @@ section[id] {
   display: block;
   width: 32px;
   height: 32px;
+  flex: none;
+  object-fit: contain;
   transition: filter 260ms ease;
 }
 
@@ -3342,13 +3341,27 @@ section[id] {
 }
 
 .site-foot .brand-mark {
+  display: block;
   width: 30px;
   height: 30px;
+  object-fit: contain;
 }
 
 @media (max-width: 900px) {
   .landing-header {
     height: 68px;
+  }
+
+  /* Matches the srcSet `sizes` hints so the browser never picks a 1x asset
+     for a 2x box (or the reverse). */
+  .landing-header .brand-mark {
+    width: 27px;
+    height: 27px;
+  }
+
+  .site-foot .brand-mark {
+    width: 28px;
+    height: 28px;
   }
 }
 
@@ -3360,11 +3373,6 @@ section[id] {
   .brand-badge {
     width: auto;
     height: auto;
-  }
-
-  .landing-header .brand-mark {
-    width: 27px;
-    height: 27px;
   }
 
   .landing-header .brand-word {
@@ -3385,10 +3393,5 @@ section[id] {
   .nav-github-icon {
     width: 15px;
     height: 15px;
-  }
-
-  .site-foot .brand-mark {
-    width: 28px;
-    height: 28px;
   }
 }

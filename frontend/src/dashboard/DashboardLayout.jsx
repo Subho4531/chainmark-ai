@@ -18,10 +18,10 @@ import Docs from './Docs'
 import './dashboard.css'
 
 const NAV = [
-  { label: 'Dashboard', to: '/dashboard', icon: LayoutGrid, meta: '01' },
-  { label: 'Playground', to: '/playground', icon: Terminal, meta: '02' },
-  { label: 'API keys', to: '/api-keys', icon: KeyRound, meta: '03' },
-  { label: 'Docs', to: '/docs', icon: BookOpen, meta: '04' },
+  { label: 'Dashboard', to: '/dashboard', icon: LayoutGrid },
+  { label: 'Playground', to: '/playground', icon: Terminal },
+  { label: 'API keys', to: '/api-keys', icon: KeyRound },
+  { label: 'Docs', to: '/docs', icon: BookOpen },
 ]
 
 const PAGES = {
@@ -42,7 +42,6 @@ export default function DashboardLayout() {
   const path = usePath()
   const route = normalize(path)
   const Page = PAGES[route] ?? Overview
-  const active = NAV.find((item) => item.to === route) ?? NAV[0]
   const [navOpen, setNavOpen] = useState(false)
 
   useEffect(() => {
@@ -55,38 +54,24 @@ export default function DashboardLayout() {
 
   return (
     <div className="dash">
-      <aside className={`dash-side ${navOpen ? 'is-open' : ''}`}>
-        <div className="dash-side-head">
-          <Link className="dash-brand" to="/dashboard" aria-label="Chainmark AI dashboard">
-            <span className="dash-brand-badge">
-              <img
-                src="/logo/mark-26.png"
-                srcSet="/logo/mark-26.png 1x, /logo/mark-52.png 2x"
-                alt=""
-                width="26"
-                height="26"
-                decoding="async"
-              />
-            </span>
-            <span className="dash-brand-word">CHAINMARK AI</span>
-          </Link>
-          <button
-            type="button"
-            className="dash-side-close"
-            aria-label="Close navigation"
-            onClick={() => setNavOpen(false)}
-          >
-            <X size={16} />
-          </button>
-        </div>
+      <header className="dash-top">
+        <Link className="dash-brand" to="/dashboard" aria-label="Chainmark AI dashboard">
+          <img
+            className="dash-brand-mark"
+            src="/logo/mark-26.png"
+            srcSet="/logo/mark-26.png 1x, /logo/mark-52.png 2x"
+            alt=""
+            width="26"
+            height="26"
+            decoding="async"
+          />
+          <span className="dash-brand-word">
+            CHAINMARK
+            <em>AI</em>
+          </span>
+        </Link>
 
-        <div className="dash-workspace">
-          <span className="dash-workspace-label">Workspace</span>
-          <span className="dash-workspace-name">acme · production</span>
-          <span className="dash-workspace-id">ws_8f21c</span>
-        </div>
-
-        <nav className="dash-nav" aria-label="Dashboard">
+        <nav id="dash-nav" className={`dash-nav ${navOpen ? 'is-open' : ''}`} aria-label="Dashboard">
           {NAV.map((item) => {
             const Icon = item.icon
             const isActive = item.to === route
@@ -98,75 +83,59 @@ export default function DashboardLayout() {
                 aria-current={isActive ? 'page' : undefined}
                 onClick={() => setNavOpen(false)}
               >
-                <Icon size={16} strokeWidth={1.6} />
+                <Icon size={15} strokeWidth={1.6} />
                 <span>{item.label}</span>
-                <span className="dash-nav-meta">{item.meta}</span>
               </Link>
             )
           })}
         </nav>
 
-        <div className="dash-side-foot">
-          <div className="dash-chain">
-            <span className="dash-chain-label">Evidence chain</span>
-            <span className="dash-chain-state">VERIFIED · seq 4182</span>
-            <span className="dash-chain-meta">last check 2m ago · ECDSA P-256</span>
-          </div>
-          <div className="dash-user">
+        <div className="dash-top-actions">
+          <label className="dash-search">
+            <Search size={14} />
+            <input type="search" placeholder="Search sessions, tokens" aria-label="Search sessions and tokens" />
+            <kbd>/</kbd>
+          </label>
+
+          <span className="dash-chain-chip" title="Evidence chain verified against the sealed ledgers">
+            <span className="dash-chain-key">chain</span>
+            <span className="dash-chain-value">verified · 4182</span>
+          </span>
+
+          <Link className="dash-btn dash-btn-primary dash-cta" to="/playground">
+            <Plus size={15} />
+            New session
+          </Link>
+
+          <button type="button" className="dash-user" aria-label="Account: subho@acme.dev">
             <span className="dash-avatar">SB</span>
             <span className="dash-user-text">
               <strong>subho@acme.dev</strong>
-              <span>Team · 12 seats</span>
+              <span>acme · production</span>
             </span>
-          </div>
-        </div>
-      </aside>
+          </button>
 
-      {navOpen ? <button type="button" className="dash-scrim" aria-label="Close navigation" onClick={() => setNavOpen(false)} /> : null}
-
-      <div className="dash-body">
-        <header className="dash-top">
           <button
             type="button"
             className="dash-menu"
-            aria-label="Open navigation"
+            aria-label={navOpen ? 'Close navigation' : 'Open navigation'}
             aria-expanded={navOpen}
-            onClick={() => setNavOpen(true)}
+            aria-controls="dash-nav"
+            onClick={() => setNavOpen((open) => !open)}
           >
-            <Menu size={18} />
+            {navOpen ? <X size={18} /> : <Menu size={18} />}
           </button>
+        </div>
+      </header>
 
-          <div className="dash-crumb">
-            <span className="dash-crumb-root">chainmark</span>
-            <span className="dash-crumb-sep">/</span>
-            <span className="dash-crumb-page">{active.label.toLowerCase()}</span>
-          </div>
+      <main className="dash-main">
+        <Page />
+      </main>
 
-          <div className="dash-top-actions">
-            <label className="dash-search">
-              <Search size={14} />
-              <input type="search" placeholder="Search sessions, tokens" aria-label="Search sessions and tokens" />
-              <kbd>/</kbd>
-            </label>
-            <Link className="dash-btn dash-btn-ghost" to="/docs">
-              SDK docs
-            </Link>
-            <Link className="dash-btn dash-btn-primary" to="/playground">
-              <Plus size={15} />
-              New session
-            </Link>
-          </div>
-        </header>
-
-        <main className="dash-main">
-          <Page />
-        </main>
-
-        <footer className="dash-foot">
-          <span>© 2026 Chainmark AI</span>
-          <span>Evidence you can verify offline</span>
-        </footer>
-      </div>
+      <footer className="dash-foot">
+        <span>© 2026 Chainmark AI</span>
+        <span>Evidence you can verify offline</span>
+      </footer>
     </div>
   )
 }
