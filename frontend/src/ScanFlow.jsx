@@ -1,3 +1,5 @@
+import { markSrc, markSrcSet } from './logo'
+
 const STAGES = [
   { n: '01', title: 'Prompt', note: 'agent egress' },
   { n: '02', title: 'Scan', note: 'detector + checksum' },
@@ -46,8 +48,8 @@ export default function ScanFlow() {
           <span className="scan-hub-label">outbound</span>
           <div className="scan-hub-node">
             <img
-              src="/logo/mark-38.png"
-              srcSet="/logo/mark-24.png 24w, /logo/mark-38.png 38w, /logo/mark-48.png 48w, /logo/mark-76.png 76w"
+              src={markSrc(38)}
+              srcSet={markSrcSet(24, 38)}
               sizes="(max-width: 900px) 24px, 38px"
               alt=""
               width="38"

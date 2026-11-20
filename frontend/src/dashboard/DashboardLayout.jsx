@@ -11,6 +11,7 @@ import {
 } from 'lucide-react'
 import { Link } from '../router'
 import { usePath } from '../routerState'
+import { markSrc, markSrcSet } from '../logo'
 import Overview from './Overview'
 import Playground from './Playground'
 import ApiKeys from './ApiKeys'
@@ -58,8 +59,9 @@ export default function DashboardLayout() {
         <Link className="dash-brand" to="/dashboard" aria-label="Chainmark AI dashboard">
           <img
             className="dash-brand-mark"
-            src="/logo/mark-26.png"
-            srcSet="/logo/mark-26.png 1x, /logo/mark-52.png 2x"
+            src={markSrc(26)}
+            srcSet={markSrcSet(26)}
+            sizes="26px"
             alt=""
             width="26"
             height="26"

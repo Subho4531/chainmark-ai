@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import FlowField from './FlowField'
 import HeroSeam from './HeroSeam'
 import ScanFlow from './ScanFlow'
+import { markSrc, markSrcSet } from './logo'
 import './landing.css'
 
 const REPO_URL = 'https://github.com/Subho4531/chainmark-ai'
@@ -352,8 +353,8 @@ export default function Landing() {
           <span className="brand-badge">
             <img
               className="brand-mark"
-              src="/logo/mark-32.png"
-              srcSet="/logo/mark-27.png 27w, /logo/mark-32.png 32w, /logo/mark-54.png 54w, /logo/mark-64.png 64w"
+              src={markSrc(32)}
+              srcSet={markSrcSet(27, 32)}
               sizes="(max-width: 900px) 27px, 32px"
               alt=""
               width="32"
@@ -824,8 +825,8 @@ export default function Landing() {
             <a className="brand" href="#top" aria-label="Chainmark AI home">
               <img
                 className="brand-mark"
-                src="/logo/mark-30.png"
-                srcSet="/logo/mark-28.png 28w, /logo/mark-30.png 30w, /logo/mark-56.png 56w, /logo/mark-60.png 60w"
+                src={markSrc(30)}
+                srcSet={markSrcSet(28, 30)}
                 sizes="(max-width: 900px) 28px, 30px"
                 alt=""
                 width="30"
