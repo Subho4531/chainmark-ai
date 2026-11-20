@@ -26,6 +26,10 @@ class DetectedEntity:
     is_fragment_assembly: bool = False
     provenance_turns: List[int] = field(default_factory=list)
     span: Optional[Tuple[int, int]] = None
+    # (turn_index, fragment_text) pairs that combine into raw_value. Fragments
+    # must be neutralized in their own turn, since the assembled value never
+    # appears literally anywhere in the payload.
+    fragments: List[Tuple[int, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -187,6 +191,7 @@ class SessionTaintEngine:
                                 confidence=1.0,
                                 is_fragment_assembly=True,
                                 provenance_turns=[turn_i_idx],
+                                fragments=[(turn_i_idx, num_a), (turn_i_idx, num_b)],
                             )
                         )
                     elif 11 <= len(joined_same) <= 19 and validate_luhn(joined_same):
@@ -197,6 +202,7 @@ class SessionTaintEngine:
                                 confidence=1.0,
                                 is_fragment_assembly=True,
                                 provenance_turns=[turn_i_idx],
+                                fragments=[(turn_i_idx, num_a), (turn_i_idx, num_b)],
                             )
                         )
 
@@ -215,6 +221,10 @@ class SessionTaintEngine:
                                     confidence=1.0,
                                     is_fragment_assembly=True,
                                     provenance_turns=[turn_i_idx, turn_j_idx],
+                                    fragments=[
+                                        (turn_i_idx, num_a),
+                                        (turn_j_idx, num_b),
+                                    ],
                                 )
                             )
                         # 3-turn concatenation
@@ -229,7 +239,16 @@ class SessionTaintEngine:
                                             raw_value=joined_3,
                                             confidence=1.0,
                                             is_fragment_assembly=True,
-                                            provenance_turns=[turn_i_idx, turn_j_idx, turn_k_idx],
+                                            provenance_turns=[
+                                                turn_i_idx,
+                                                turn_j_idx,
+                                                turn_k_idx,
+                                            ],
+                                            fragments=[
+                                                (turn_i_idx, num_a),
+                                                (turn_j_idx, num_b),
+                                                (turn_k_idx, num_c),
+                                            ],
                                         )
                                     )
 
@@ -246,16 +265,32 @@ class SessionTaintEngine:
                                     confidence=1.0,
                                     is_fragment_assembly=True,
                                     provenance_turns=[turn_i_idx, turn_j_idx],
+                                    fragments=[
+                                        (turn_i_idx, num_a),
+                                        (turn_j_idx, num_b),
+                                    ],
                                 )
                             )
 
-        # Deduplicate detections by (entity_type, raw_value)
-        unique_detections: List[DetectedEntity] = []
-        seen = set()
-        for d in all_detections:
-            key = (d.entity_type, d.raw_value)
-            if key not in seen:
-                seen.add(key)
-                unique_detections.append(d)
+        # Deduplicate detections by (entity_type, raw_value), merging provenance
+        # so a value repeated in several turns is redacted in every one of them.
+        by_key: Dict[Tuple[str, str], DetectedEntity] = {}
+        for detection in all_detections:
+            key = (detection.entity_type, detection.raw_value)
+            existing = by_key.get(key)
+            if existing is None:
+                by_key[key] = detection
+                continue
 
-        return unique_detections
+            for turn in detection.provenance_turns:
+                if turn not in existing.provenance_turns:
+                    existing.provenance_turns.append(turn)
+            for fragment in detection.fragments:
+                if fragment not in existing.fragments:
+                    existing.fragments.append(fragment)
+            existing.confidence = max(existing.confidence, detection.confidence)
+            existing.is_fragment_assembly = (
+                existing.is_fragment_assembly or detection.is_fragment_assembly
+            )
+
+        return list(by_key.values())

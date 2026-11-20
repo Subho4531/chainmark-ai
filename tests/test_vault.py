@@ -10,7 +10,7 @@ def test_token_format_and_reversibility():
 
     token = vault.tokenize_value("AADHAAR", raw_aadhaar, session_id)
 
-    # Check format: [CM_TOKEN_AADHAAR_<8_hex_chars>]
+    # Check format: [CM_TOKEN_AADHAAR_<32_hex_chars>]
     assert token.startswith("[CM_TOKEN_AADHAAR_")
     assert token.endswith("]")
 
@@ -61,7 +61,6 @@ async def test_streaming_chunk_detokenization():
     token = vault.tokenize_value("PAN", raw_val, session_id)
 
     # Simulate SSE stream where the token is split across chunks
-    # e.g., token is [CM_TOKEN_PAN_12345678]
     split_pt = len(token) // 2
     part_1 = token[:split_pt]
     part_2 = token[split_pt:]

@@ -34,6 +34,7 @@ htmlcov/
 # Scratch & temporary JSON files
 ai_trials.json
 count_chatbot.json
+chat_export.txt
 evidence_pack*.zip
 
 # OS artifacts

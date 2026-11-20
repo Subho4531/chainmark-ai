@@ -227,3 +227,7 @@ async def test_cloak_with_multi_turn_history():
         assert len(data["detected_entities"]) >= 1
         aadhaar_ent = [e for e in data["detected_entities"] if e["entity_type"] == "AADHAAR"][0]
         assert aadhaar_ent["is_fragment_assembly"] is True
+
+        # The fragment present in this call must not survive in the cloaked text.
+        assert part2 not in data["cloaked_text"]
+        assert "[CM_TOKEN_AADHAAR_" in data["cloaked_text"]

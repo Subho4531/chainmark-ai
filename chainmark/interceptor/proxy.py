@@ -3,25 +3,30 @@ FastAPI Transparent Reverse Proxy Gateway.
 Intercepts agent LLM calls, detects multi-turn session-level jigsaw leaks,
 tokenizes sensitive entities via AES-256-GCM vault, forwards sanitized prompts,
 detokenizes responses on the fly, and seals the transaction in an immutable Merkle DAG.
+
+Route contract:
+  * Redaction is span-anchored and applied to every egress text unit, including
+    tool-call arguments, not just message content.
+  * Token accounting only reports tokens that were actually inserted.
+  * If a detected value cannot be proven absent from the egress payload the
+    request is blocked (fail closed), never forwarded.
 """
 
-from typing import Dict, Any, Optional, List
-import os
+from typing import Dict, Any, Optional, List, Sequence, Callable, Tuple
 import json
 import hashlib
-import time
 import secrets
-import re
+from dataclasses import dataclass
 import httpx
-from fastapi import FastAPI, Request, Response, HTTPException, status
+from fastapi import FastAPI, Request, Response, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 import uvicorn
 
 from chainmark.core.config import settings
-from chainmark.detector.taint_engine import SessionTaintEngine
-from chainmark.vault.token_vault import TokenVault
+from chainmark.detector.taint_engine import SessionTaintEngine, DetectedEntity
+from chainmark.vault.token_vault import TokenVault, RedactionResult, StreamTokenRestorer
 from chainmark.evidence.merkle_chain import MerkleHashChain
 from chainmark.evidence.signer import EvidenceSigner
 
@@ -46,6 +51,8 @@ taint_engine = SessionTaintEngine(max_history_turns=settings.SESSION_SLIDING_WIN
 vault = TokenVault(master_key_hex=settings.VAULT_MASTER_KEY)
 signer = EvidenceSigner()
 session_chains: Dict[str, MerkleHashChain] = {}
+
+POLICY_BLOCK_STATUS = 422
 
 
 def get_or_create_chain(session_id: str) -> MerkleHashChain:
@@ -79,7 +86,202 @@ def resolve_session_id(request: Request, body: Dict[str, Any]) -> str:
         digest = hashlib.sha256(first_content.encode("utf-8")).hexdigest()[:12]
         return f"auto_session_{digest}"
 
+    # 4. Gemini-native payloads carry "contents", not "messages". Without this
+    #    every Gemini tenant would share one taint session and one vault scope.
+    contents = body.get("contents", [])
+    if contents and isinstance(contents, list) and len(contents) > 0:
+        first = contents[0] if isinstance(contents[0], dict) else {}
+        parts = first.get("parts") or []
+        first_text = ""
+        for part in parts:
+            if isinstance(part, dict) and isinstance(part.get("text"), str):
+                first_text = part["text"]
+                break
+        digest = hashlib.sha256(first_text.encode("utf-8")).hexdigest()[:12]
+        return f"auto_session_{digest}"
+
     return "default_session"
+
+
+# ----------------------------------------------------------------------
+# Egress text units
+# ----------------------------------------------------------------------
+
+
+@dataclass
+class TextUnit:
+    """A single string that leaves the gateway, plus how to write it back."""
+
+    text: str
+    setter: Callable[[str], None]
+
+
+def _openai_text_units(messages: Sequence[Any]) -> List[TextUnit]:
+    """
+    Collects every string an upstream model can read from an OpenAI payload:
+    message content, multimodal text parts, and tool-call arguments.
+    """
+    units: List[TextUnit] = []
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+
+        content = message.get("content")
+        if isinstance(content, str):
+            units.append(TextUnit(content, lambda value, m=message: m.__setitem__("content", value)))
+        elif isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and isinstance(part.get("text"), str):
+                    units.append(TextUnit(part["text"], lambda value, p=part: p.__setitem__("text", value)))
+
+        for tool_call in message.get("tool_calls") or []:
+            if not isinstance(tool_call, dict):
+                continue
+            function = tool_call.get("function")
+            if isinstance(function, dict) and isinstance(function.get("arguments"), str):
+                units.append(
+                    TextUnit(
+                        function["arguments"],
+                        lambda value, f=function: f.__setitem__("arguments", value),
+                    )
+                )
+    return units
+
+
+def _gemini_text_units(contents: Sequence[Any]) -> List[TextUnit]:
+    units: List[TextUnit] = []
+    for content in contents:
+        if not isinstance(content, dict):
+            continue
+        for part in content.get("parts") or []:
+            if isinstance(part, dict) and isinstance(part.get("text"), str):
+                units.append(TextUnit(part["text"], lambda value, p=part: p.__setitem__("text", value)))
+    return units
+
+
+def _units_as_messages(units: Sequence[TextUnit]) -> List[Dict[str, Any]]:
+    return [{"role": "user", "content": unit.text} for unit in units]
+
+
+def _block_unredactable(
+    chain: MerkleHashChain,
+    event_type: str,
+    raw_payload_str: str,
+    result: RedactionResult,
+) -> None:
+    entity_types = sorted({entity.entity_type for entity in result.unresolved})
+    chain.append_event(
+        event_type=event_type,
+        raw_input=raw_payload_str,
+        sanitized_output="",
+        entities_detected=entity_types,
+        tokens_mapped=[],
+        policy_action="BLOCKED_UNREDACTABLE",
+    )
+    raise HTTPException(
+        status_code=POLICY_BLOCK_STATUS,
+        detail={
+            "error": "chainmark_policy_violation",
+            "reason": "sensitive_value_could_not_be_neutralized",
+            "entity_types": entity_types,
+        },
+    )
+
+
+def scan_and_redact(
+    units: List[TextUnit],
+    session_id: str,
+    chain: MerkleHashChain,
+    event_type: str,
+    raw_payload_str: str,
+    turn_indices: Optional[Sequence[int]] = None,
+) -> Tuple[RedactionResult, List[DetectedEntity]]:
+    """
+    Detects entities across all egress units, redacts them in place, and blocks
+    the request if any detected value survives the redaction pass.
+    """
+    texts = [unit.text for unit in units]
+    detections = taint_engine.process_messages(session_id, _units_as_messages(units))
+    result = vault.redact_texts(texts, detections, session_id, turn_indices=turn_indices)
+
+    if result.unresolved and settings.FAIL_CLOSED:
+        _block_unredactable(chain, event_type, raw_payload_str, result)
+
+    for unit, sanitized in zip(units, result.texts):
+        if unit.text != sanitized:
+            unit.setter(sanitized)
+
+    return result, detections
+
+
+# ----------------------------------------------------------------------
+# Ingress detokenization
+# ----------------------------------------------------------------------
+
+
+def _detokenize_openai_response(payload: Dict[str, Any], session_id: str) -> int:
+    unresolved = 0
+    for choice in payload.get("choices") or []:
+        if not isinstance(choice, dict):
+            continue
+        message = choice.get("message")
+        if not isinstance(message, dict):
+            continue
+
+        content = message.get("content")
+        if isinstance(content, str):
+            message["content"], count = vault.detokenize_text_strict(content, session_id)
+            unresolved += count
+        elif isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and isinstance(part.get("text"), str):
+                    part["text"], count = vault.detokenize_text_strict(part["text"], session_id)
+                    unresolved += count
+
+        for tool_call in message.get("tool_calls") or []:
+            function = (tool_call or {}).get("function") if isinstance(tool_call, dict) else None
+            if isinstance(function, dict) and isinstance(function.get("arguments"), str):
+                function["arguments"], count = vault.detokenize_text_strict(
+                    function["arguments"], session_id
+                )
+                unresolved += count
+    return unresolved
+
+
+def _detokenize_gemini_response(payload: Dict[str, Any], session_id: str) -> int:
+    unresolved = 0
+    for candidate in payload.get("candidates") or []:
+        if not isinstance(candidate, dict):
+            continue
+        parts = (candidate.get("content") or {}).get("parts") or []
+        for part in parts:
+            if isinstance(part, dict) and isinstance(part.get("text"), str):
+                part["text"], count = vault.detokenize_text_strict(part["text"], session_id)
+                unresolved += count
+    return unresolved
+
+
+def _raise_unresolved_ingress(chain: MerkleHashChain, event_type: str) -> None:
+    chain.append_event(
+        event_type=event_type,
+        raw_input="",
+        sanitized_output="",
+        entities_detected=[],
+        tokens_mapped=[],
+        policy_action="BLOCKED_UNRESOLVED_TOKEN",
+    )
+    raise HTTPException(
+        status_code=502,
+        detail={
+            "error": "chainmark_policy_violation",
+            "reason": "upstream_response_contained_unresolvable_token",
+        },
+    )
+
+
+# ----------------------------------------------------------------------
+# Routes
+# ----------------------------------------------------------------------
 
 
 @app.get("/health")
@@ -90,6 +292,7 @@ async def health_check():
         "active_policies": settings.ACTIVE_POLICIES,
         "enabled_detectors": settings.ENABLED_DETECTORS,
         "vault_active": True,
+        "fail_closed": settings.FAIL_CLOSED,
         "signing_pubkey": signer.get_public_key_pem(),
     }
 
@@ -98,7 +301,7 @@ async def health_check():
 async def handle_openai_chat_completions(request: Request):
     """
     OpenAI-compatible chat completions proxy endpoint.
-    Wraps prompt and tool histories, redacts sensitive jigsaw fragments,
+    Wraps prompts and tool histories, redacts sensitive jigsaw fragments,
     and returns detokenized responses.
     """
     try:
@@ -108,94 +311,52 @@ async def handle_openai_chat_completions(request: Request):
 
     session_id = resolve_session_id(request, body)
     messages = body.get("messages", [])
-    stream_requested = body.get("stream", False)
+    if not isinstance(messages, list):
+        raise HTTPException(status_code=400, detail="messages must be a list")
+    stream_requested = bool(body.get("stream", False))
 
     chain = get_or_create_chain(session_id)
-
-    # 1. L2 Session Taint & Jigsaw Assembly Scan
-    detected_entities = taint_engine.process_messages(session_id, messages)
-
-    # 2. L4 Redaction & Vault Storage
     raw_payload_str = json.dumps(messages, sort_keys=True)
-    all_tokens_mapped = []
 
-    if detected_entities:
-        sanitized_messages = []
-        for msg in messages:
-            content = msg.get("content", "")
-            if isinstance(content, str):
-                redacted_content, tokens = vault.redact_text(content, detected_entities, session_id)
-                msg_copy = dict(msg)
-                msg_copy["content"] = redacted_content
-                sanitized_messages.append(msg_copy)
-                all_tokens_mapped.extend([t[0] for t in tokens])
-            else:
-                sanitized_messages.append(msg)
-        body["messages"] = sanitized_messages
-    else:
-        body["messages"] = messages
+    # 1. L2 Session Taint & Jigsaw Assembly Scan over every egress text unit.
+    units = _openai_text_units(messages)
+    result, detections = scan_and_redact(
+        units=units,
+        session_id=session_id,
+        chain=chain,
+        event_type="LLM_PROMPT_EGRESS",
+        raw_payload_str=raw_payload_str,
+    )
+    body["messages"] = messages
 
-    sanitized_payload_str = json.dumps(body["messages"], sort_keys=True)
-    entity_types = [e.entity_type for e in detected_entities]
-
-    # 3. L5 Evidence Spool: Append event to Merkle chain
+    # 2. L5 Evidence Spool: only tokens that were actually inserted are recorded.
+    sanitized_payload_str = json.dumps(messages, sort_keys=True)
     chain.append_event(
         event_type="LLM_PROMPT_EGRESS",
         raw_input=raw_payload_str,
         sanitized_output=sanitized_payload_str,
-        entities_detected=entity_types,
-        tokens_mapped=all_tokens_mapped,
-        policy_action="TOKENIZE_AND_FORWARD" if detected_entities else "ALLOW",
+        entities_detected=sorted({entity.entity_type for entity in detections}),
+        tokens_mapped=result.tokens_mapped,
+        policy_action="TOKENIZE_AND_FORWARD" if result.tokens_mapped else "ALLOW",
     )
 
-    # 4. Prepare upstream request
+    # 3. Prepare upstream request
     upstream_url = f"{settings.UPSTREAM_OPENAI_BASE_URL.rstrip('/')}/chat/completions"
     headers = dict(request.headers)
-    # Remove hop-by-hop headers
-    headers.pop("host", None)
-    headers.pop("content-length", None)
+    for header in ("host", "content-length", "x-chainmark-session-id"):
+        headers.pop(header, None)
 
     # Key management: pass-through or managed
     if settings.AUTH_MODE == "managed" and settings.MANAGED_OPENAI_API_KEY:
         headers["authorization"] = f"Bearer {settings.MANAGED_OPENAI_API_KEY}"
 
-    client = httpx.AsyncClient(timeout=60.0)
-
-    # 5. Handle Streaming vs Non-Streaming
+    # 4. Handle Streaming vs Non-Streaming
     if stream_requested:
-        async def event_stream():
-            try:
-                async with client.stream("POST", upstream_url, json=body, headers=headers) as upstream_resp:
-                    if upstream_resp.status_code != 200:
-                        err_bytes = await upstream_resp.aread()
-                        yield f"data: {json.dumps({'error': err_bytes.decode('utf-8')})}\n\n"
-                        return
-
-                    async for line in upstream_resp.aiter_lines():
-                        if not line:
-                            yield "\n"
-                            continue
-                        if line.startswith("data: "):
-                            data_str = line[6:].strip()
-                            if data_str == "[DONE]":
-                                yield "data: [DONE]\n\n"
-                                break
-                            try:
-                                chunk_json = json.loads(data_str)
-                                delta = chunk_json.get("choices", [{}])[0].get("delta", {})
-                                if "content" in delta and delta["content"]:
-                                    delta["content"] = vault.detokenize_text(delta["content"], session_id)
-                                yield f"data: {json.dumps(chunk_json)}\n\n"
-                            except Exception:
-                                # Detokenize raw string if parsing fails
-                                detok_line = vault.detokenize_text(data_str, session_id)
-                                yield f"data: {detok_line}\n\n"
-                        else:
-                            yield f"{line}\n"
-            finally:
-                await client.aclose()
-
-        return StreamingResponse(event_stream(), media_type="text/event-stream")
+        client = httpx.AsyncClient(timeout=60.0)
+        return StreamingResponse(
+            _stream_openai_response(client, upstream_url, body, headers, session_id),
+            media_type="text/event-stream",
+        )
 
     # Non-streaming response
     try:
@@ -212,11 +373,10 @@ async def handle_openai_chat_completions(request: Request):
 
     resp_json = upstream_resp.json()
 
-    # 6. Detokenize upstream LLM response
-    for choice in resp_json.get("choices", []):
-        msg = choice.get("message", {})
-        if "content" in msg and isinstance(msg["content"], str):
-            msg["content"] = vault.detokenize_text(msg["content"], session_id)
+    # 5. Detokenize upstream LLM response (content, parts, tool arguments)
+    unresolved = _detokenize_openai_response(resp_json, session_id)
+    if unresolved and settings.FAIL_CLOSED:
+        _raise_unresolved_ingress(chain, "LLM_COMPLETION_INGRESS")
 
     # Record completion in evidence chain
     chain.append_event(
@@ -229,6 +389,115 @@ async def handle_openai_chat_completions(request: Request):
     )
 
     return resp_json
+
+
+async def _stream_openai_response(
+    client: httpx.AsyncClient,
+    upstream_url: str,
+    body: Dict[str, Any],
+    headers: Dict[str, str],
+    session_id: str,
+):
+    """
+    Streams SSE while holding back only text that could still turn out to be a
+    token split across deltas. Content is reattached to the newest pending
+    event, so the client sees one ordered content stream.
+    """
+    restorer = StreamTokenRestorer(vault, session_id)
+    tool_restorers: Dict[int, StreamTokenRestorer] = {}
+    pending: List[Dict[str, Any]] = []
+
+    def drain(safe_text: str) -> List[str]:
+        events: List[Dict[str, Any]] = []
+        target: Optional[Dict[str, Any]] = None
+        while pending:
+            event = pending.pop(0)
+            for choice in event.get("choices") or []:
+                delta = choice.get("delta")
+                if isinstance(delta, dict):
+                    delta.pop("content", None)
+                    target = delta
+            events.append(event)
+
+        if safe_text and target is not None:
+            target["content"] = safe_text
+        elif safe_text:
+            events.append(
+                {
+                    "choices": [
+                        {"index": 0, "delta": {"content": safe_text}, "finish_reason": None}
+                    ]
+                }
+            )
+
+        return [f"data: {json.dumps(event)}\n\n" for event in events]
+
+    try:
+        async with client.stream("POST", upstream_url, json=body, headers=headers) as upstream_resp:
+            if upstream_resp.status_code != 200:
+                error_bytes = await upstream_resp.aread()
+                yield f"data: {json.dumps({'error': error_bytes.decode('utf-8', errors='replace')})}\n\n"
+                return
+
+            async for line in upstream_resp.aiter_lines():
+                if not line:
+                    continue
+                if not line.startswith("data: "):
+                    yield f"{line}\n"
+                    continue
+
+                data_str = line[6:].strip()
+                if data_str == "[DONE]":
+                    break
+
+                try:
+                    event = json.loads(data_str)
+                except Exception:
+                    # Unparseable chunk: restore what we can and pass it through.
+                    yield f"data: {json.dumps(vault.detokenize_text(data_str, session_id))}\n\n"
+                    continue
+
+                choices = event.get("choices") or []
+                delta = choices[0].get("delta") if choices else None
+                safe_text = ""
+                pending.append(event)
+
+                if isinstance(delta, dict):
+                    content = delta.get("content")
+                    if isinstance(content, str) and content:
+                        delta["content"] = ""
+                        safe_text = restorer.push(content)
+
+                    for tool_call in delta.get("tool_calls") or []:
+                        if not isinstance(tool_call, dict):
+                            continue
+                        index = tool_call.get("index", 0)
+                        function = tool_call.get("function") or {}
+                        arguments = function.get("arguments")
+                        if isinstance(arguments, str) and arguments:
+                            tool_restorer = tool_restorers.get(index)
+                            if tool_restorer is None:
+                                tool_restorer = StreamTokenRestorer(vault, session_id)
+                                tool_restorers[index] = tool_restorer
+                            function["arguments"] = tool_restorer.push(arguments)
+
+                if safe_text:
+                    for emitted in drain(safe_text):
+                        yield emitted
+
+        tail = restorer.flush()
+        for emitted in drain(tail):
+            yield emitted
+
+        for tool_restorer in tool_restorers.values():
+            # Complete tokens still buffered in tool arguments are restored.
+            # A truncated partial token cannot be resolved and is dropped with
+            # the malformed tool call it belongs to.
+            tool_restorer.flush()
+
+        yield "data: [DONE]\n\n"
+    finally:
+        await client.aclose()
 
 
 @app.post("/v1beta/models/{model_path:path}:generateContent")
@@ -245,43 +514,35 @@ async def handle_gemini_generate_content(model_path: str, request: Request):
     chain = get_or_create_chain(session_id)
 
     contents = body.get("contents", [])
+    if not isinstance(contents, list):
+        raise HTTPException(status_code=400, detail="contents must be a list")
     raw_payload_str = json.dumps(contents, sort_keys=True)
 
-    # Flatten Gemini contents for entity detection
-    text_parts = []
-    for c in contents:
-        for p in c.get("parts", []):
-            if "text" in p and isinstance(p["text"], str):
-                text_parts.append({"role": c.get("role", "user"), "content": p["text"]})
+    # 1. Detection + redaction over all text parts.
+    units = _gemini_text_units(contents)
+    result, detections = scan_and_redact(
+        units=units,
+        session_id=session_id,
+        chain=chain,
+        event_type="GEMINI_PROMPT_EGRESS",
+        raw_payload_str=raw_payload_str,
+    )
+    body["contents"] = contents
 
-    detected_entities = taint_engine.process_messages(session_id, text_parts)
-    all_tokens_mapped = []
-
-    if detected_entities:
-        for c in contents:
-            for p in c.get("parts", []):
-                if "text" in p and isinstance(p["text"], str):
-                    redacted, tokens = vault.redact_text(p["text"], detected_entities, session_id)
-                    p["text"] = redacted
-                    all_tokens_mapped.extend([t[0] for t in tokens])
-        body["contents"] = contents
-
-    sanitized_payload_str = json.dumps(body["contents"], sort_keys=True)
-    entity_types = [e.entity_type for e in detected_entities]
-
+    sanitized_payload_str = json.dumps(contents, sort_keys=True)
     chain.append_event(
         event_type="GEMINI_PROMPT_EGRESS",
         raw_input=raw_payload_str,
         sanitized_output=sanitized_payload_str,
-        entities_detected=entity_types,
-        tokens_mapped=all_tokens_mapped,
-        policy_action="TOKENIZE_AND_FORWARD" if detected_entities else "ALLOW",
+        entities_detected=sorted({entity.entity_type for entity in detections}),
+        tokens_mapped=result.tokens_mapped,
+        policy_action="TOKENIZE_AND_FORWARD" if result.tokens_mapped else "ALLOW",
     )
 
     upstream_url = f"{settings.UPSTREAM_GEMINI_BASE_URL.rstrip('/')}/v1beta/models/{model_path}:generateContent"
     headers = dict(request.headers)
-    headers.pop("host", None)
-    headers.pop("content-length", None)
+    for header in ("host", "content-length", "x-chainmark-session-id"):
+        headers.pop(header, None)
 
     if settings.AUTH_MODE == "managed" and settings.MANAGED_GEMINI_API_KEY:
         headers["x-goog-api-key"] = settings.MANAGED_GEMINI_API_KEY
@@ -301,10 +562,9 @@ async def handle_gemini_generate_content(model_path: str, request: Request):
     resp_json = upstream_resp.json()
 
     # Detokenize candidates
-    for cand in resp_json.get("candidates", []):
-        for part in cand.get("content", {}).get("parts", []):
-            if "text" in part and isinstance(part["text"], str):
-                part["text"] = vault.detokenize_text(part["text"], session_id)
+    unresolved = _detokenize_gemini_response(resp_json, session_id)
+    if unresolved and settings.FAIL_CLOSED:
+        _raise_unresolved_ingress(chain, "GEMINI_COMPLETION_INGRESS")
 
     chain.append_event(
         event_type="GEMINI_COMPLETION_INGRESS",
@@ -371,7 +631,7 @@ async def list_sessions():
         entities = set()
         for e in chain.events:
             entities.update(e.entities_detected)
-        
+
         is_valid, _ = chain.verify_chain()
         sessions_list.append({
             "session_id": sid,
@@ -392,7 +652,7 @@ async def get_session_detail(session_id: str):
     chain = session_chains.get(session_id)
     if not chain:
         raise HTTPException(status_code=404, detail="Session not found")
-    
+
     is_valid, err = chain.verify_chain()
     events_data = []
     for e in chain.events:
@@ -408,7 +668,7 @@ async def get_session_detail(session_id: str):
             "prev_hash": e.prev_hash,
             "node_hash": e.node_hash,
         })
-        
+
     return {
         "session_id": session_id,
         "is_valid": is_valid,
@@ -427,14 +687,14 @@ async def simulate_prompt(request: Request):
     """
     data = await request.json()
     session_id = data.get("session_id", "demo_simulation")
-    messages = data.get("messages", [])
+    messages = data.get("messages") or []
     protected = data.get("protected", True)
-    
+
     chain = get_or_create_chain(session_id)
-    
+
     # 1. Detection
     detected_entities = taint_engine.process_messages(session_id, messages)
-    
+
     if not protected:
         # In unprotected mode, raw PII leaks to external LLM
         return {
@@ -453,36 +713,39 @@ async def simulate_prompt(request: Request):
             "simulated_llm_response": f"External LLM processed raw prompt: {messages[-1].get('content', '') if messages else ''}",
             "audit_trail_recorded": False,
         }
-    
-    # Protected mode
+
+    # Protected mode: redact every message, fragments included.
+    raw_payload_str = json.dumps(messages, sort_keys=True)
+    texts = [m.get("content", "") if isinstance(m, dict) else "" for m in messages]
+    result = vault.redact_texts(texts, detected_entities, session_id, turn_indices=list(range(len(texts))))
+
+    if result.unresolved and settings.FAIL_CLOSED:
+        _block_unredactable(chain, "SIMULATION_PROMPT_EGRESS", raw_payload_str, result)
+
     sanitized_messages = []
-    all_tokens = []
-    for msg in messages:
-        content = msg.get("content", "")
-        if isinstance(content, str):
-            redacted, tokens = vault.redact_text(content, detected_entities, session_id)
-            msg_copy = dict(msg)
-            msg_copy["content"] = redacted
-            sanitized_messages.append(msg_copy)
-            all_tokens.extend([t[0] for t in tokens])
+    for message, sanitized in zip(messages, result.texts):
+        if isinstance(message, dict):
+            copy = dict(message)
+            copy["content"] = sanitized
+            sanitized_messages.append(copy)
         else:
-            sanitized_messages.append(msg)
-            
+            sanitized_messages.append(message)
+
     # Record in Merkle chain
     chain.append_event(
         event_type="SIMULATION_PROMPT_EGRESS",
-        raw_input=json.dumps(messages, sort_keys=True),
+        raw_input=raw_payload_str,
         sanitized_output=json.dumps(sanitized_messages, sort_keys=True),
         entities_detected=[e.entity_type for e in detected_entities],
-        tokens_mapped=all_tokens,
-        policy_action="TOKENIZE_AND_FORWARD" if detected_entities else "ALLOW",
+        tokens_mapped=result.tokens_mapped,
+        policy_action="TOKENIZE_AND_FORWARD" if result.tokens_mapped else "ALLOW",
     )
-    
+
     # Simulate LLM answering using the token
     last_sanitized = sanitized_messages[-1].get("content", "") if sanitized_messages else ""
     simulated_llm_raw = f"Verified identity record for {last_sanitized}. Status: Cleared for processing."
     detokenized_final = vault.detokenize_text(simulated_llm_raw, session_id)
-    
+
     chain.append_event(
         event_type="SIMULATION_COMPLETION_INGRESS",
         raw_input=simulated_llm_raw,
@@ -491,7 +754,7 @@ async def simulate_prompt(request: Request):
         tokens_mapped=[],
         policy_action="DETOKENIZE_FOR_CLIENT",
     )
-    
+
     return {
         "mode": "CHAINMARK_PROTECTED",
         "detected_entities": [
@@ -504,7 +767,7 @@ async def simulate_prompt(request: Request):
             for e in detected_entities
         ],
         "egress_payload": sanitized_messages,
-        "tokens_generated": all_tokens,
+        "tokens_generated": result.tokens_mapped,
         "simulated_llm_raw": simulated_llm_raw,
         "detokenized_client_response": detokenized_final,
         "merkle_root": chain.get_merkle_root(),
@@ -523,11 +786,11 @@ async def tamper_session(session_id: str):
     chain = session_chains.get(session_id)
     if not chain or not chain.events:
         raise HTTPException(status_code=404, detail="Session not found or has no events")
-    
+
     # Corrupt node_hash of the first event
     chain.events[0].node_hash = "deadbeef" * 8
     is_valid, err = chain.verify_chain()
-    
+
     return {
         "tampered": True,
         "session_id": session_id,
@@ -558,19 +821,29 @@ async def handle_cloak(payload: CloakRequest):
     req_id = payload.cloak_request_id or f"cloak_{secrets.token_hex(6)}"
     chain = get_or_create_chain(req_id)
 
-    scan_messages = list(payload.history or []) + [{"role": "user", "content": payload.text}]
+    history = list(payload.history or [])
+    scan_messages = history + [{"role": "user", "content": payload.text}]
     detected_entities = taint_engine.process_messages(req_id, scan_messages)
 
-    cloaked_text, tokens = vault.redact_text(payload.text, detected_entities, req_id)
-    tokens_mapped = [t[0] for t in tokens]
+    # Only the current text is egress here; fragments living in history are
+    # context, not something this call can retract.
+    current_turn = len(scan_messages) - 1
+    result = vault.redact_texts(
+        [payload.text], detected_entities, req_id, turn_indices=[current_turn]
+    )
+
+    if result.unresolved and settings.FAIL_CLOSED:
+        _block_unredactable(chain, "CLOAK_OPERATION", payload.text, result)
+
+    cloaked_text = result.texts[0]
 
     chain.append_event(
         event_type="CLOAK_OPERATION",
         raw_input=payload.text,
         sanitized_output=cloaked_text,
         entities_detected=[e.entity_type for e in detected_entities],
-        tokens_mapped=tokens_mapped,
-        policy_action="CLOAKED_WITH_TOKENS" if detected_entities else "PASSTHROUGH",
+        tokens_mapped=result.tokens_mapped,
+        policy_action="CLOAKED_WITH_TOKENS" if result.tokens_mapped else "PASSTHROUGH",
     )
 
     return {
@@ -582,14 +855,14 @@ async def handle_cloak(payload: CloakRequest):
             {
                 "entity_type": e.entity_type,
                 "raw_value": e.raw_value,
-                "token": vault.tokenize_value(e.entity_type, e.raw_value, req_id),
+                "token": vault.find_token(e.entity_type, e.raw_value, req_id),
                 "confidence": e.confidence,
                 "is_fragment_assembly": e.is_fragment_assembly,
                 "provenance_turns": e.provenance_turns,
             }
             for e in detected_entities
         ],
-        "tokens_mapped": tokens_mapped,
+        "tokens_mapped": result.tokens_mapped,
         "merkle_root": chain.get_merkle_root(),
         "event_sequence": len(chain.events) - 1,
     }
@@ -609,9 +882,26 @@ async def handle_uncloak(cloakrequestid: Optional[str] = None, payload: Optional
     chain = get_or_create_chain(req_id)
     text_to_uncloak = payload.cloaked_text if payload and payload.cloaked_text is not None else ""
 
-    uncloaked_text = vault.detokenize_text(text_to_uncloak, req_id)
-    token_pattern = re.compile(r"\[CM_TOKEN_[A-Z_]+_[a-f0-9]{8}\]")
-    tokens_restored = len(token_pattern.findall(text_to_uncloak))
+    uncloaked_text, unresolved = vault.detokenize_text_strict(text_to_uncloak, req_id)
+    matched_tokens = len(vault.TOKEN_RE.findall(text_to_uncloak))
+
+    if unresolved and settings.FAIL_CLOSED:
+        chain.append_event(
+            event_type="UNCLOAK_OPERATION",
+            raw_input=text_to_uncloak,
+            sanitized_output="",
+            entities_detected=[],
+            tokens_mapped=[],
+            policy_action="BLOCKED_UNRESOLVED_TOKEN",
+        )
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "chainmark_vault_miss",
+                "reason": "one_or_more_tokens_are_not_resolvable_in_this_session",
+                "unresolved_count": unresolved,
+            },
+        )
 
     chain.append_event(
         event_type="UNCLOAK_OPERATION",
@@ -627,7 +917,8 @@ async def handle_uncloak(cloakrequestid: Optional[str] = None, payload: Optional
         "cloak_request_id": req_id,
         "cloaked_text": text_to_uncloak,
         "uncloaked_text": uncloaked_text,
-        "tokens_restored_count": tokens_restored,
+        "tokens_restored_count": matched_tokens - unresolved,
+        "tokens_unresolved_count": unresolved,
         "merkle_root": chain.get_merkle_root(),
         "event_sequence": len(chain.events) - 1,
     }

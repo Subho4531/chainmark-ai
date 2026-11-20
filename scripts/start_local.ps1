@@ -4,4 +4,7 @@ Write-Host "   Backend Proxy Gateway:  http://localhost:8000         " -Foregrou
 Write-Host "   Frontend React Console: http://localhost:5173         " -ForegroundColor Green
 Write-Host "==========================================================" -ForegroundColor Cyan
 
-uv run python run_local.py
+$root = Split-Path -Parent $PSScriptRoot
+Set-Location $root
+
+uv run python scripts/run_local.py
