@@ -25,6 +25,8 @@ pub async fn handle_messages(
 
     let stream = body.get("stream").and_then(|s| s.as_bool()).unwrap_or(false);
 
+    state.ensure_hydrated(&session_id).await;
+
     // 1. Extract texts from Anthropic system and messages
     let mut texts_to_scan: Vec<String> = Vec::new();
     let mut scan_tuples: Vec<(String, String)> = Vec::new();
@@ -58,16 +60,17 @@ pub async fn handle_messages(
     let redaction = state.vault.redact_texts(&texts_to_scan, &detected_entities, &session_id);
 
     if !redaction.unresolved.is_empty() && state.config.fail_closed {
-        state.with_chain(&session_id, |chain| {
-            chain.append_event(
+        state
+            .record_event(
+                &session_id,
                 "ANTHROPIC_PROMPT_EGRESS",
                 &serde_json::to_string(&texts_to_scan).unwrap_or_default(),
                 "",
                 detected_entities.iter().map(|e| e.entity_type.to_string()).collect(),
                 vec![],
                 "BLOCKED_UNREDACTABLE",
-            );
-        });
+            )
+            .await;
 
         return Err((
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -77,6 +80,8 @@ pub async fn handle_messages(
             })),
         ));
     }
+
+    state.persist_redaction(&session_id, &redaction.tokens_mapped).await;
 
     // 3. Write back sanitized text
     let mut text_idx = 0;
@@ -108,16 +113,17 @@ pub async fn handle_messages(
     }
 
     // 4. Evidence event
-    state.with_chain(&session_id, |chain| {
-        chain.append_event(
+    state
+        .record_event(
+            &session_id,
             "ANTHROPIC_PROMPT_EGRESS",
             &serde_json::to_string(&texts_to_scan).unwrap_or_default(),
             &serde_json::to_string(&redaction.texts).unwrap_or_default(),
             detected_entities.iter().map(|e| e.entity_type.to_string()).collect(),
             redaction.tokens_mapped.clone(),
             if redaction.tokens_mapped.is_empty() { "ALLOW" } else { "TOKENIZE_AND_FORWARD" },
-        );
-    });
+        )
+        .await;
 
     // 5. Upstream call
     let upstream_url = format!("{}/messages", state.config.upstream_anthropic_url.trim_end_matches('/'));
@@ -158,16 +164,17 @@ pub async fn handle_messages(
             }
         }
 
-        state.with_chain(&session_id, |chain| {
-            chain.append_event(
+        state
+            .record_event(
+                &session_id,
                 "ANTHROPIC_COMPLETION_INGRESS",
                 &resp_text,
                 &serde_json::to_string(&resp_json).unwrap_or_default(),
                 vec![],
                 vec![],
                 "DETOKENIZE_FOR_CLIENT",
-            );
-        });
+            )
+            .await;
 
         return Ok((status, Json(resp_json)).into_response());
     }
