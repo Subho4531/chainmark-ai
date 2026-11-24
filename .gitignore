@@ -8,6 +8,8 @@ __pycache__/
 venv/
 ENV/
 env/
+# Node dependencies
+node_modules/
 frontend/node_modules/
 frontend/dist/
 

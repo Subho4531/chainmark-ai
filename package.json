@@ -1,0 +1,18 @@
+{
+  "name": "chainmark-ai",
+  "version": "0.2.0",
+  "type": "module",
+  "scripts": {
+    "db:ping": "bun scripts/test_db_ping.ts",
+    "db:push": "drizzle-kit push --force"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "drizzle-orm": "^0.38.4",
+    "jszip": "^3.10.2",
+    "postgres": "^3.4.5"
+  },
+  "devDependencies": {
+    "drizzle-kit": "^0.30.2"
+  }
+}
