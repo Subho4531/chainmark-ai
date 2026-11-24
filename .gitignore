@@ -17,8 +17,9 @@ frontend/dist/
 *.key
 *.sig
 
-# Distribution / packaging
-build/
+# Rust build artifacts
+target/
+Cargo.lock
 dist/
 *.egg-info/
 

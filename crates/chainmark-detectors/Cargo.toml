@@ -1,0 +1,11 @@
+[package]
+name = "chainmark-detectors"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+chainmark-types = { workspace = true }
+regex = { workspace = true }
+serde = { workspace = true }

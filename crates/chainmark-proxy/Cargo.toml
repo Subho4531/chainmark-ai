@@ -1,0 +1,31 @@
+[package]
+name = "chainmark-proxy"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+chainmark-types = { workspace = true }
+chainmark-detectors = { workspace = true }
+chainmark-vault = { workspace = true }
+chainmark-buffer = { workspace = true }
+chainmark-evidence = { workspace = true }
+
+tokio = { workspace = true }
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+futures = { workspace = true }
+tokio-stream = { workspace = true }
+uuid = { workspace = true }
+bytes = { workspace = true }
+hex = { workspace = true }
+
+[dev-dependencies]
+http-body-util = { workspace = true }

@@ -1,0 +1,11 @@
+[package]
+name = "chainmark-buffer"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+chainmark-types = { workspace = true }
+chainmark-vault = { workspace = true }
+regex = { workspace = true }
