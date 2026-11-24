@@ -26,6 +26,9 @@ tokio-stream = { workspace = true }
 uuid = { workspace = true }
 bytes = { workspace = true }
 hex = { workspace = true }
+tokio-postgres = { workspace = true }
+deadpool-postgres = { workspace = true }
+dotenvy = { workspace = true }
 
 [dev-dependencies]
 http-body-util = { workspace = true }

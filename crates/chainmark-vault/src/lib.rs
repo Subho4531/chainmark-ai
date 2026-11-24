@@ -254,6 +254,41 @@ impl TokenVault {
             unresolved,
         }
     }
+
+    /// Returns VaultRecords for the specified token IDs (used for DB write-through).
+    pub fn get_records_by_tokens(&self, tokens: &[String]) -> Vec<VaultRecord> {
+        let records = self.records.lock().unwrap();
+        tokens
+            .iter()
+            .filter_map(|t| records.get(t).cloned())
+            .collect()
+    }
+
+    /// Returns all VaultRecords belonging to a given session.
+    pub fn get_session_records(&self, session_id: &str) -> Vec<VaultRecord> {
+        let records = self.records.lock().unwrap();
+        records
+            .values()
+            .filter(|r| r.session_id == session_id)
+            .cloned()
+            .collect()
+    }
+
+    /// Hydrates persisted VaultRecords (e.g., from PostgreSQL) into the in-memory vault cache.
+    pub fn hydrate_records(&self, incoming: Vec<VaultRecord>) {
+        if incoming.is_empty() {
+            return;
+        }
+        let mut records = self.records.lock().unwrap();
+        let mut cache = self.session_cache.lock().unwrap();
+        for rec in incoming {
+            let session_map = cache.entry(rec.session_id.clone()).or_default();
+            session_map
+                .entry(rec.value_digest.clone())
+                .or_insert_with(|| rec.token_id.clone());
+            records.entry(rec.token_id.clone()).or_insert(rec);
+        }
+    }
 }
 
 #[cfg(test)]

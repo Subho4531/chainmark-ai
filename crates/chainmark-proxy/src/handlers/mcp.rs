@@ -25,6 +25,8 @@ pub async fn handle_mcp_message(
 
     let method = body.get("method").and_then(|m| m.as_str()).unwrap_or("unknown").to_string();
 
+    state.ensure_hydrated(&session_id).await;
+
     // Extract text from params.arguments or params.contents
     let mut texts_to_scan: Vec<String> = Vec::new();
 
@@ -43,16 +45,17 @@ pub async fn handle_mcp_message(
     let redaction = state.vault.redact_texts(&texts_to_scan, &detected_entities, &session_id);
 
     if !redaction.unresolved.is_empty() && state.config.fail_closed {
-        state.with_chain(&session_id, |chain| {
-            chain.append_event(
+        state
+            .record_event(
+                &session_id,
                 "MCP_MESSAGE_EGRESS",
                 &serde_json::to_string(&texts_to_scan).unwrap_or_default(),
                 "",
                 detected_entities.iter().map(|e| e.entity_type.to_string()).collect(),
                 vec![],
                 "BLOCKED_UNREDACTABLE",
-            );
-        });
+            )
+            .await;
 
         return Err((
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -62,6 +65,8 @@ pub async fn handle_mcp_message(
             })),
         ));
     }
+
+    state.persist_redaction(&session_id, &redaction.tokens_mapped).await;
 
     // Write back sanitized text if modified
     if let Some(first_sanitized) = redaction.texts.first() {
@@ -76,16 +81,17 @@ pub async fn handle_mcp_message(
         }
     }
 
-    state.with_chain(&session_id, |chain| {
-        chain.append_event(
+    state
+        .record_event(
+            &session_id,
             "MCP_MESSAGE_EGRESS",
             &serde_json::to_string(&texts_to_scan).unwrap_or_default(),
             &serde_json::to_string(&redaction.texts).unwrap_or_default(),
             detected_entities.iter().map(|e| e.entity_type.to_string()).collect(),
             redaction.tokens_mapped.clone(),
             format!("MCP_{}", method).as_str(),
-        );
-    });
+        )
+        .await;
 
     // Forward to upstream MCP server
     let upstream_url = format!("{}/message", state.config.upstream_mcp_url.trim_end_matches('/'));
@@ -118,16 +124,17 @@ pub async fn handle_mcp_message(
         }
     }
 
-    state.with_chain(&session_id, |chain| {
-        chain.append_event(
+    state
+        .record_event(
+            &session_id,
             "MCP_MESSAGE_INGRESS",
             &resp_text,
             &serde_json::to_string(&resp_json).unwrap_or_default(),
             vec![],
             vec![],
             "DETOKENIZE_FOR_CLIENT",
-        );
-    });
+        )
+        .await;
 
     Ok((status, Json(resp_json)).into_response())
 }
@@ -141,6 +148,8 @@ pub async fn handle_mcp_sse(
         .and_then(|h| h.to_str().ok())
         .map(|s| s.to_string())
         .unwrap_or_else(|| "default_mcp_sse_session".to_string());
+
+    state.ensure_hydrated(&session_id).await;
 
     let upstream_url = format!("{}/sse", state.config.upstream_mcp_url.trim_end_matches('/'));
     let upstream_resp = state.http_client.get(&upstream_url).send().await.map_err(|e| {

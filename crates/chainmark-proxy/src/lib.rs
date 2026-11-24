@@ -5,10 +5,12 @@ use axum::{
 use tower_http::cors::{Any, CorsLayer};
 
 pub mod config;
+pub mod db;
 pub mod handlers;
 pub mod state;
 
 pub use config::ProxyConfig;
+pub use db::PgStore;
 pub use state::AppState;
 
 pub fn create_app(state: AppState) -> Router {

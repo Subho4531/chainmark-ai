@@ -26,6 +26,8 @@ pub async fn handle_chat_completions(
 
     let stream = body.get("stream").and_then(|s| s.as_bool()).unwrap_or(false);
 
+    state.ensure_hydrated(&session_id).await;
+
     let messages = match body.get_mut("messages").and_then(|m| m.as_array_mut()) {
         Some(m) => m,
         None => {
@@ -64,16 +66,17 @@ pub async fn handle_chat_completions(
     let redaction = state.vault.redact_texts(&texts_to_scan, &detected_entities, &session_id);
 
     if !redaction.unresolved.is_empty() && state.config.fail_closed {
-        state.with_chain(&session_id, |chain| {
-            chain.append_event(
+        state
+            .record_event(
+                &session_id,
                 "LLM_PROMPT_EGRESS",
                 &serde_json::to_string(&texts_to_scan).unwrap_or_default(),
                 "",
                 detected_entities.iter().map(|e| e.entity_type.to_string()).collect(),
                 vec![],
                 "BLOCKED_UNREDACTABLE",
-            );
-        });
+            )
+            .await;
 
         return Err((
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -83,6 +86,8 @@ pub async fn handle_chat_completions(
             })),
         ));
     }
+
+    state.persist_redaction(&session_id, &redaction.tokens_mapped).await;
 
     // 3. Write sanitized strings back into the request payload
     let mut text_idx = 0;
@@ -107,16 +112,17 @@ pub async fn handle_chat_completions(
     }
 
     // 4. Record egress in Merkle evidence chain
-    state.with_chain(&session_id, |chain| {
-        chain.append_event(
+    state
+        .record_event(
+            &session_id,
             "LLM_PROMPT_EGRESS",
             &serde_json::to_string(&texts_to_scan).unwrap_or_default(),
             &serde_json::to_string(&redaction.texts).unwrap_or_default(),
             detected_entities.iter().map(|e| e.entity_type.to_string()).collect(),
             redaction.tokens_mapped.clone(),
             if redaction.tokens_mapped.is_empty() { "ALLOW" } else { "TOKENIZE_AND_FORWARD" },
-        );
-    });
+        )
+        .await;
 
     // 5. Forward request to upstream
     let upstream_url = format!("{}/chat/completions", state.config.upstream_openai_url.trim_end_matches('/'));
@@ -165,16 +171,17 @@ pub async fn handle_chat_completions(
             }
         }
 
-        state.with_chain(&session_id, |chain| {
-            chain.append_event(
+        state
+            .record_event(
+                &session_id,
                 "LLM_COMPLETION_INGRESS",
                 &resp_text,
                 &serde_json::to_string(&resp_json).unwrap_or_default(),
                 vec![],
                 vec![],
                 "DETOKENIZE_FOR_CLIENT",
-            );
-        });
+            )
+            .await;
 
         return Ok((status, Json(resp_json)).into_response());
     }

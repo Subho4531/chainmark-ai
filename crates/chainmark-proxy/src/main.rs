@@ -9,13 +9,13 @@ async fn main() {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    let config = ProxyConfig::default();
+    let config = ProxyConfig::from_env();
     let addr = SocketAddr::new(
         config.host.parse().expect("valid IP address"),
         config.port,
     );
 
-    let state = AppState::new(config);
+    let state = AppState::new_with_db(config).await;
     let app = create_app(state);
 
     tracing::info!("Chainmark AI Rust Gateway listening on http://{}", addr);

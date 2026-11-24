@@ -31,6 +31,8 @@ pub async fn handle_cloak(
         .cloak_request_id
         .unwrap_or_else(|| format!("cloak_{}", &Uuid::new_v4().to_string()[..8]));
 
+    state.ensure_hydrated(&req_id).await;
+
     let mut scan_messages: Vec<(&str, &str)> = Vec::new();
 
     // Add history if present
@@ -55,16 +57,17 @@ pub async fn handle_cloak(
     let redaction = state.vault.redact_texts(&[payload.text.clone()], &detected_entities, &req_id);
 
     if !redaction.unresolved.is_empty() && state.config.fail_closed {
-        state.with_chain(&req_id, |chain| {
-            chain.append_event(
+        state
+            .record_event(
+                &req_id,
                 "CLOAK_OPERATION",
                 &payload.text,
                 "",
                 detected_entities.iter().map(|e| e.entity_type.to_string()).collect(),
                 vec![],
                 "BLOCKED_UNREDACTABLE",
-            );
-        });
+            )
+            .await;
 
         return Err((
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -75,19 +78,21 @@ pub async fn handle_cloak(
         ));
     }
 
+    state.persist_redaction(&req_id, &redaction.tokens_mapped).await;
+
     let cloaked_text = redaction.texts.first().cloned().unwrap_or_default();
 
-    let (merkle_root, event_seq) = state.with_chain(&req_id, |chain| {
-        let seq = chain.append_event(
+    let (merkle_root, event_seq) = state
+        .record_event(
+            &req_id,
             "CLOAK_OPERATION",
             &payload.text,
             &cloaked_text,
             detected_entities.iter().map(|e| e.entity_type.to_string()).collect(),
             redaction.tokens_mapped.clone(),
             if redaction.tokens_mapped.is_empty() { "PASSTHROUGH" } else { "CLOAKED_WITH_TOKENS" },
-        ).sequence;
-        (chain.get_merkle_root(), seq)
-    });
+        )
+        .await;
 
     let detected_json: Vec<_> = detected_entities
         .into_iter()
@@ -122,7 +127,7 @@ pub async fn handle_uncloak_path(
     payload: Option<Json<UncloakRequest>>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
     let text = payload.and_then(|p| p.cloaked_text.clone()).unwrap_or_default();
-    uncloak_core(&state, &cloak_request_id, &text)
+    uncloak_core(&state, &cloak_request_id, &text).await
 }
 
 pub async fn handle_uncloak_body(
@@ -139,20 +144,30 @@ pub async fn handle_uncloak_body(
         }
     };
     let text = payload.cloaked_text.unwrap_or_default();
-    uncloak_core(&state, &req_id, &text)
+    uncloak_core(&state, &req_id, &text).await
 }
 
-fn uncloak_core(
+async fn uncloak_core(
     state: &AppState,
     req_id: &str,
     text: &str,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    state.ensure_hydrated(req_id).await;
+
     let (uncloaked, unresolved) = state.vault.detokenize_text_strict(text, req_id);
 
     if unresolved > 0 && state.config.fail_closed {
-        state.with_chain(req_id, |chain| {
-            chain.append_event("UNCLOAK_OPERATION", text, "", vec![], vec![], "BLOCKED_UNRESOLVED_TOKEN");
-        });
+        state
+            .record_event(
+                req_id,
+                "UNCLOAK_OPERATION",
+                text,
+                "",
+                vec![],
+                vec![],
+                "BLOCKED_UNRESOLVED_TOKEN",
+            )
+            .await;
         return Err((
             StatusCode::CONFLICT,
             Json(json!({
@@ -162,10 +177,17 @@ fn uncloak_core(
         ));
     }
 
-    let (root, seq) = state.with_chain(req_id, |chain| {
-        let seq = chain.append_event("UNCLOAK_OPERATION", text, &uncloaked, vec![], vec![], "UNCLOAKED_FOR_CLIENT").sequence;
-        (chain.get_merkle_root(), seq)
-    });
+    let (root, seq) = state
+        .record_event(
+            req_id,
+            "UNCLOAK_OPERATION",
+            text,
+            &uncloaked,
+            vec![],
+            vec![],
+            "UNCLOAKED_FOR_CLIENT",
+        )
+        .await;
 
     Ok(Json(json!({
         "status": "success",

@@ -30,6 +30,21 @@ impl EntityType {
             EntityType::Unknown => "UNKNOWN",
         }
     }
+
+    pub fn from_str_lossy(s: &str) -> Self {
+        match s.trim().to_ascii_uppercase().as_str() {
+            "AADHAAR" => EntityType::Aadhaar,
+            "CREDIT_CARD" => EntityType::CreditCard,
+            "PAN" => EntityType::Pan,
+            "SSN" => EntityType::Ssn,
+            "MRN" => EntityType::Mrn,
+            "EMAIL" => EntityType::Email,
+            "PHONE" => EntityType::Phone,
+            "IBAN" => EntityType::Iban,
+            "API_KEY" => EntityType::ApiKey,
+            _ => EntityType::Unknown,
+        }
+    }
 }
 
 impl std::fmt::Display for EntityType {
