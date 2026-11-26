@@ -10,6 +10,8 @@ pub struct ProxyConfig {
     pub vault_master_key: [u8; 32],
     pub fail_closed: bool,
     pub database_url: Option<String>,
+    pub cloud_url: Option<String>,
+    pub cloud_api_token: Option<String>,
 }
 
 impl ProxyConfig {
@@ -55,6 +57,16 @@ impl ProxyConfig {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
 
+        let cloud_url = env::var("CHAINMARK_CLOUD_URL")
+            .ok()
+            .map(|s| s.trim().trim_end_matches('/').to_string())
+            .filter(|s| !s.is_empty());
+
+        let cloud_api_token = env::var("CHAINMARK_API_TOKEN")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+
         Self {
             host,
             port,
@@ -64,6 +76,8 @@ impl ProxyConfig {
             vault_master_key: key,
             fail_closed,
             database_url,
+            cloud_url,
+            cloud_api_token,
         }
     }
 }
@@ -80,6 +94,8 @@ impl Default for ProxyConfig {
             vault_master_key: [42u8; 32],
             fail_closed: true,
             database_url: None,
+            cloud_url: None,
+            cloud_api_token: None,
         }
     }
 }

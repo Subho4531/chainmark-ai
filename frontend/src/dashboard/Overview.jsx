@@ -1,100 +1,49 @@
-import { useMemo, useState } from 'react'
-import { ArrowUpRight, Check, Copy } from 'lucide-react'
+import { useEffect, useMemo, useState } from 'react'
+import { ArrowUpRight, Check, Copy, Download, ShieldCheck } from 'lucide-react'
 import { Link } from '../router'
+import { useAuth } from '../auth/AuthContext'
 
 const RANGES = [
-  { id: '24h', label: '24 hours' },
-  { id: '7d', label: '7 days' },
-  { id: '30d', label: '30 days' },
+  { id: '24h', label: '24h' },
+  { id: '7d', label: '7d' },
+  { id: '30d', label: '30d' },
 ]
-
-const SERIES = {
-  '24h': [18, 16, 14, 12, 11, 10, 13, 19, 27, 34, 31, 36, 43, 47, 44, 40, 38, 35, 33, 30, 27, 24, 22, 20],
-  '7d': [34, 29, 41, 48, 52, 44, 39, 46, 58, 63, 61, 55, 49, 44],
-  '30d': [22, 26, 31, 28, 34, 39, 36, 42, 48, 45, 51, 57, 54, 60, 66, 62, 58, 63, 69, 72],
-}
-
-const STATS = [
-  {
-    label: 'Requests intercepted',
-    value: '128,412',
-    delta: '+18.2%',
-    note: 'across 41 agent sessions',
-    spark: [30, 32, 31, 36, 38, 35, 41, 44, 43, 48, 52, 50, 56, 59],
-    accent: false,
-  },
-  {
-    label: 'Entities tokenized',
-    value: '9,847',
-    delta: '+6.4%',
-    note: '1.9 per intercepted call',
-    spark: [20, 22, 21, 24, 23, 27, 26, 29, 28, 32, 31, 33, 35, 36],
-    accent: false,
-  },
-  {
-    label: 'Plaintext egress',
-    value: '0',
-    delta: 'none detected',
-    note: 'verified against 41 ledgers',
-    spark: [4, 4, 3, 3, 2, 2, 2, 1, 1, 1, 1, 0, 0, 0],
-    accent: true,
-  },
-  {
-    label: 'Chain entries sealed',
-    value: '4,182',
-    delta: 'continuous',
-    note: 'seq 0000 → 4181, no gaps',
-    spark: [12, 16, 21, 25, 30, 34, 38, 41, 45, 49, 53, 57, 60, 64],
-    accent: false,
-  },
-]
-
-const DETECTORS = [
-  { name: 'email', count: 4128, share: 42 },
-  { name: 'card · luhn', count: 2914, share: 30 },
-  { name: 'iban · mod-97', count: 1206, share: 12 },
-  { name: 'phone', count: 894, share: 9 },
-  { name: 'api key', count: 512, share: 5 },
-  { name: 'national id', count: 193, share: 2 },
-]
-
-const SESSIONS = [
-  { id: 'agent-7f2c', requests: 42, tokens: 41, when: '2 min ago', window: '11:42 — 11:58' },
-  { id: 'agent-91ab', requests: 18, tokens: 12, when: '14 min ago', window: '11:31 — 11:44' },
-  { id: 'agent-4d07', requests: 96, tokens: 130, when: '31 min ago', window: '11:02 — 11:27' },
-  { id: 'agent-c3e1', requests: 7, tokens: 3, when: '1 hr ago', window: '10:48 — 10:52' },
-  { id: 'agent-2b88', requests: 63, tokens: 58, when: '2 hrs ago', window: '09:58 — 10:21' },
-]
-
-const EVENTS = [
-  { time: '11:58', text: 'Session agent-7f2c sealed · 42 entries', tone: 'warm' },
-  { time: '11:44', text: 'Card family match rejected by Luhn at hop 3', tone: '' },
-  { time: '11:27', text: 'Taint rule escalated · IBAN re-checked on reply', tone: '' },
-  { time: '10:52', text: 'Key rotated · vault re-wrapped, 0 re-encryption errors', tone: '' },
-  { time: '09:58', text: 'Verifier replay · 41 ledgers, 0 divergences', tone: 'warm' },
-]
-
-const VERIFY_CMD = 'uv run chainmark-verify --session agent-7f2c'
 
 function trendPath(values) {
-  const max = Math.max(...values)
-  const min = Math.min(...values)
-  const span = max - min || 1
-  return values
+  const safe = values && values.length >= 2 ? values : [0, 0]
+  const max = Math.max(...safe, 1)
+  return safe
     .map((value, index) => {
-      const x = (index / (values.length - 1)) * 100
-      const y = 100 - ((value - min) / span) * 84 - 8
-      return `${index === 0 ? 'M' : 'L'}${x.toFixed(2)},${y.toFixed(2)}`
+      const x = (index / (safe.length - 1)) * 100
+      const y = 92 - (value / max) * 78
+      return `${index === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`
     })
     .join(' ')
 }
 
+function formatBytes(bytes) {
+  if (!bytes) return '0 B'
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`
+}
+
+function formatRelative(iso) {
+  if (!iso) return '—'
+  const diffSec = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 1000))
+  if (diffSec < 60) return `${diffSec}s ago`
+  if (diffSec < 3600) return `${Math.floor(diffSec / 60)} min ago`
+  if (diffSec < 86400) return `${Math.floor(diffSec / 3600)} hr ago`
+  return `${Math.floor(diffSec / 86400)}d ago`
+}
+
 function Spark({ points, accent }) {
-  const max = Math.max(...points)
-  const min = Math.min(...points)
+  const safe = points && points.length >= 2 ? points : [0, 0]
+  const max = Math.max(...safe)
+  const min = Math.min(...safe)
   const span = max - min || 1
-  const d = points
-    .map((point, index) => `${(index / (points.length - 1)) * 100},${28 - ((point - min) / span) * 24}`)
+  const d = safe
+    .map((point, index) => `${(index / (safe.length - 1)) * 100},${28 - ((point - min) / span) * 24}`)
     .join(' ')
 
   return (
@@ -111,15 +60,60 @@ function Spark({ points, accent }) {
 }
 
 export default function Overview() {
+  const { org } = useAuth()
   const [range, setRange] = useState('24h')
+  const [data, setData] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
   const [copied, setCopied] = useState(false)
-  const series = SERIES[range]
+  const [verifyMap, setVerifyMap] = useState({})
+
+  useEffect(() => {
+    let cancelled = false
+    fetch(`/api/analytics/overview?range=${encodeURIComponent(range)}`, {
+      credentials: 'include',
+    })
+      .then(async (res) => {
+        const payload = await res.json().catch(() => ({}))
+        if (!res.ok) throw new Error(payload.error || 'Failed to load analytics')
+        return payload
+      })
+      .then((payload) => {
+        if (!cancelled) {
+          setError('')
+          setData(payload)
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) setError(err.message)
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [range])
+
+  const series = useMemo(() => data?.series || [], [data?.series])
   const line = useMemo(() => trendPath(series), [series])
   const area = `${line} L100,100 L0,100 Z`
+  const summary = data?.summary || {
+    totalSessions: 0,
+    eventsInWindow: 0,
+    totalEventsStored: 0,
+    tokensRedacted: 0,
+    blockedCalls: 0,
+    estimatedAuditBytes: 0,
+    packsStored: 0,
+  }
+
+  const headSessionId = data?.chainHead?.sessionId || 'agent-session'
+  const verifyCmd = `curl -O ${typeof window !== 'undefined' ? window.location.origin : ''}/api/analytics/sessions/${headSessionId}/export`
 
   const copyCmd = async () => {
     try {
-      await navigator.clipboard.writeText(VERIFY_CMD)
+      await navigator.clipboard.writeText(verifyCmd)
       setCopied(true)
       window.setTimeout(() => setCopied(false), 1800)
     } catch {
@@ -127,15 +121,64 @@ export default function Overview() {
     }
   }
 
+  const verifySession = async (sessionId) => {
+    try {
+      const res = await fetch(
+        `/api/analytics/sessions/${encodeURIComponent(sessionId)}/verify`,
+        { credentials: 'include' },
+      )
+      const result = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(result.error || 'Verification failed')
+      setVerifyMap((prev) => ({
+        ...prev,
+        [sessionId]: result.valid ? 'VERIFIED' : 'INVALID',
+      }))
+    } catch {
+      setVerifyMap((prev) => ({ ...prev, [sessionId]: 'ERROR' }))
+    }
+  }
+
+  const statsCards = [
+    {
+      label: 'Sessions sealed',
+      value: summary.totalSessions.toLocaleString(),
+      delta: org?.slug || 'cloud',
+      note: 'PostgreSQL org ledger',
+      spark: series,
+      accent: true,
+    },
+    {
+      label: 'Merkle events',
+      value: summary.eventsInWindow.toLocaleString(),
+      delta: `${summary.totalEventsStored} total`,
+      note: `in ${range} window`,
+      spark: series,
+    },
+    {
+      label: 'Tokens redacted',
+      value: summary.tokensRedacted.toLocaleString(),
+      delta: `${summary.blockedCalls} blocked`,
+      note: '0 plaintext uploaded',
+      spark: series,
+    },
+    {
+      label: 'Audit storage metered',
+      value: formatBytes(summary.estimatedAuditBytes),
+      delta: `${summary.packsStored} zip packs`,
+      note: 'Option 2 cloud retention',
+      spark: series,
+    },
+  ]
+
   return (
     <div className="ov">
       <header className="dash-page-head">
         <div>
-          <p className="dash-eyebrow">Control plane</p>
+          <p className="dash-eyebrow">Cloud control plane · {org?.name}</p>
           <h1 className="dash-title">Overview</h1>
           <p className="dash-lede">
-            Every agent call through the gateway, scanned and sealed. The numbers below come from the
-            local evidence chain, not from a billing meter.
+            Live zero-plaintext telemetry ingested from your Docker proxy containers. Plaintext
+            prompts stay inside your local AES-256-GCM vault.
           </p>
         </div>
         <div className="dash-segment" role="group" aria-label="Time range">
@@ -153,8 +196,35 @@ export default function Overview() {
         </div>
       </header>
 
+      {error ? (
+        <p className="ov-error" role="alert">
+          {error}
+        </p>
+      ) : null}
+
+      {!loading && summary.totalSessions === 0 ? (
+        <section className="ov-panel ov-empty" aria-label="Onboarding">
+          <div className="ov-panel-head">
+            <h2>No telemetry received for {org?.name} yet</h2>
+            <span className="ov-panel-meta">0 events metered</span>
+          </div>
+          <p className="ov-empty-copy">
+            Mint a workspace API key (`cm_live_…`) and pass it to your local Rust Docker proxy
+            container via <code>CHAINMARK_API_TOKEN</code> to start streaming signed Merkle events.
+          </p>
+          <div className="ov-empty-actions">
+            <Link className="dash-btn dash-btn-primary" to="/api-keys">
+              Create workspace API key
+            </Link>
+            <Link className="dash-btn dash-btn-ghost" to="/playground">
+              Open local playground
+            </Link>
+          </div>
+        </section>
+      ) : null}
+
       <section className="ov-stats" aria-label="Key metrics">
-        {STATS.map((stat) => (
+        {statsCards.map((stat) => (
           <article className="ov-stat" key={stat.label}>
             <p className="ov-stat-label">{stat.label}</p>
             <p className={`ov-stat-value ${stat.accent ? 'is-accent' : ''}`}>{stat.value}</p>
@@ -170,8 +240,8 @@ export default function Overview() {
       <section className="ov-grid" aria-label="Traffic">
         <article className="ov-panel ov-trend">
           <div className="ov-panel-head">
-            <h2>Intercepted throughput</h2>
-            <span className="ov-panel-meta">calls / hour</span>
+            <h2>Ingested audit events</h2>
+            <span className="ov-panel-meta">{range} buckets</span>
           </div>
           <div className="ov-chart">
             <svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
@@ -182,37 +252,48 @@ export default function Overview() {
                 </linearGradient>
               </defs>
               {[0, 25, 50, 75, 100].map((y) => (
-                <line key={y} x1="0" y1={y} x2="100" y2={y} stroke="#171717" strokeWidth="1" vectorEffect="non-scaling-stroke" />
+                <line
+                  key={y}
+                  x1="0"
+                  y1={y}
+                  x2="100"
+                  y2={y}
+                  stroke="#171717"
+                  strokeWidth="1"
+                  vectorEffect="non-scaling-stroke"
+                />
               ))}
               <path d={area} fill="url(#ov-area)" />
               <path d={line} fill="none" stroke="#ff571a" strokeWidth="1.6" vectorEffect="non-scaling-stroke" />
             </svg>
           </div>
           <div className="ov-axis">
-            <span>00:00</span>
-            <span>06:00</span>
-            <span>12:00</span>
-            <span>18:00</span>
-            <span>23:59</span>
+            <span>Start ({range})</span>
+            <span>Midpoint</span>
+            <span>Now</span>
           </div>
         </article>
 
         <article className="ov-panel ov-mix">
           <div className="ov-panel-head">
             <h2>Detector mix</h2>
-            <span className="ov-panel-meta">9,847 tokens</span>
+            <span className="ov-panel-meta">{summary.tokensRedacted} tokens</span>
           </div>
-          <ul className="ov-bars">
-            {DETECTORS.map((detector) => (
-              <li key={detector.name}>
-                <span className="ov-bar-name">{detector.name}</span>
-                <span className="ov-bar-track">
-                  <span className="ov-bar-fill" style={{ width: `${detector.share}%` }} />
-                </span>
-                <span className="ov-bar-count">{detector.count.toLocaleString()}</span>
-              </li>
-            ))}
-          </ul>
+          {(data?.detectors || []).length === 0 ? (
+            <p className="ov-empty-copy">No entities flagged in this window.</p>
+          ) : (
+            <ul className="ov-bars">
+              {data.detectors.map((detector) => (
+                <li key={detector.name}>
+                  <span className="ov-bar-name">{detector.name}</span>
+                  <span className="ov-bar-track">
+                    <span className="ov-bar-fill" style={{ width: `${detector.share}%` }} />
+                  </span>
+                  <span className="ov-bar-count">{detector.count.toLocaleString()}</span>
+                </li>
+              ))}
+            </ul>
+          )}
         </article>
       </section>
 
@@ -220,8 +301,8 @@ export default function Overview() {
         <article className="ov-panel ov-table">
           <div className="ov-panel-head">
             <h2>Recent sessions</h2>
-            <Link className="ov-link" to="/playground">
-              Open playground
+            <Link className="ov-link" to="/api-keys">
+              Manage API keys
               <ArrowUpRight size={13} />
             </Link>
           </div>
@@ -230,26 +311,53 @@ export default function Overview() {
               <thead>
                 <tr>
                   <th scope="col">Session</th>
-                  <th scope="col">Requests</th>
-                  <th scope="col">Tokens</th>
-                  <th scope="col">Window</th>
-                  <th scope="col">Chain</th>
+                  <th scope="col">Events</th>
+                  <th scope="col">Merkle root</th>
+                  <th scope="col">Integrity</th>
                   <th scope="col">Seen</th>
+                  <th scope="col">Receipt</th>
                 </tr>
               </thead>
               <tbody>
-                {SESSIONS.map((session) => (
-                  <tr key={session.id}>
-                    <td className="ov-mono">{session.id}</td>
-                    <td>{session.requests}</td>
-                    <td>{session.tokens}</td>
-                    <td className="ov-mono ov-dim">{session.window}</td>
-                    <td>
-                      <span className="ov-chip">VERIFIED</span>
+                {(data?.sessions || []).length === 0 ? (
+                  <tr>
+                    <td colSpan={6} className="ov-dim">
+                      No sessions recorded yet.
                     </td>
-                    <td className="ov-dim">{session.when}</td>
                   </tr>
-                ))}
+                ) : (
+                  data.sessions.map((session) => {
+                    const verifyLabel = verifyMap[session.sessionId] || session.status
+                    return (
+                      <tr key={session.sessionId}>
+                        <td className="ov-mono">{session.sessionId}</td>
+                        <td>{session.totalEvents}</td>
+                        <td className="ov-mono ov-dim">{session.merkleRoot.slice(0, 12)}…</td>
+                        <td>
+                          <button
+                            type="button"
+                            className="ov-chip ov-chip-btn"
+                            onClick={() => verifySession(session.sessionId)}
+                            title="Run cryptographic chain verification"
+                          >
+                            <ShieldCheck size={11} />
+                            {verifyLabel}
+                          </button>
+                        </td>
+                        <td className="ov-dim">{formatRelative(session.lastActive)}</td>
+                        <td>
+                          <a
+                            className="ov-download"
+                            href={`/api/analytics/sessions/${encodeURIComponent(session.sessionId)}/export`}
+                          >
+                            <Download size={13} />
+                            .zip
+                          </a>
+                        </td>
+                      </tr>
+                    )
+                  })
+                )}
               </tbody>
             </table>
           </div>
@@ -258,26 +366,32 @@ export default function Overview() {
         <div className="ov-stack">
           <article className="ov-panel ov-chain">
             <div className="ov-panel-head">
-              <h2>Chain integrity</h2>
-              <span className="ov-panel-meta">seq 0000 → 4181</span>
+              <h2>Latest chain head</h2>
+              <span className="ov-panel-meta">
+                {data?.chainHead ? `${data.chainHead.totalEvents} events` : 'awaiting telemetry'}
+              </span>
             </div>
             <dl className="ov-kv">
               <div>
-                <dt>Digest</dt>
-                <dd className="ov-mono">sha256:9c1f…4ab2</dd>
+                <dt>Session</dt>
+                <dd className="ov-mono">{data?.chainHead?.sessionId || '—'}</dd>
+              </div>
+              <div>
+                <dt>Merkle root</dt>
+                <dd className="ov-mono">
+                  {data?.chainHead ? `${data.chainHead.merkleRoot.slice(0, 16)}…` : '—'}
+                </dd>
               </div>
               <div>
                 <dt>Signature</dt>
-                <dd className="ov-mono">ecdsa-p256 · valid</dd>
-              </div>
-              <div>
-                <dt>Vault</dt>
-                <dd className="ov-mono">41 tokens · 0 plaintext</dd>
+                <dd className="ov-mono">
+                  {data?.chainHead?.signatureValid ? 'ecdsa-p256 · present' : 'unsigned / pending'}
+                </dd>
               </div>
             </dl>
             <div className="ov-cmd">
-              <code>{VERIFY_CMD}</code>
-              <button type="button" onClick={copyCmd} aria-label="Copy verify command">
+              <code>{verifyCmd}</code>
+              <button type="button" onClick={copyCmd} aria-label="Copy export command">
                 {copied ? <Check size={13} /> : <Copy size={13} />}
               </button>
             </div>
@@ -286,15 +400,24 @@ export default function Overview() {
           <article className="ov-panel">
             <div className="ov-panel-head">
               <h2>Latest events</h2>
-              <span className="ov-panel-meta">chain log</span>
+              <span className="ov-panel-meta">digest log</span>
             </div>
             <ul className="ov-events">
-              {EVENTS.map((event) => (
-                <li key={event.time + event.text}>
-                  <span className="ov-mono ov-dim">{event.time}</span>
-                  <span className={event.tone === 'warm' ? 'is-warm' : ''}>{event.text}</span>
+              {(data?.latestEvents || []).length === 0 ? (
+                <li>
+                  <span className="ov-dim">No audit events recorded in this window.</span>
                 </li>
-              ))}
+              ) : (
+                data.latestEvents.map((event) => (
+                  <li key={event.id}>
+                    <span className="ov-mono ov-dim">#{event.sequence}</span>
+                    <span className={event.policyAction.includes('BLOCK') ? 'is-warm' : ''}>
+                      {event.eventType} · {event.sessionId} ({event.tokenCount} tokens ·{' '}
+                      {event.inputDigest.slice(0, 8)}…)
+                    </span>
+                  </li>
+                ))
+              )}
             </ul>
           </article>
         </div>

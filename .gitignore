@@ -15,6 +15,7 @@ frontend/dist/
 
 # Environment variables & sensitive keys
 .env
+.env.docker
 *.pem
 *.key
 *.sig
@@ -43,3 +44,6 @@ evidence_pack*.zip
 # OS artifacts
 .DS_Store
 Thumbs.db
+
+# Local design-tool cache
+.impeccable/

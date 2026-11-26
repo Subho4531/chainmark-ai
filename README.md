@@ -32,6 +32,16 @@ uv sync
 uv run pytest -v
 ```
 
+Run the full stack in Docker (console on :8080, gateway on :8010, cloud API on
+:3002, Postgres on :5433):
+
+```powershell
+.\scripts\docker_up.ps1
+```
+
+See [docs/DOCKER.md](docs/DOCKER.md) for service details, health checks, and
+port overrides.
+
 Run the local stack (backend on :8000, frontend on :5173):
 
 ```powershell

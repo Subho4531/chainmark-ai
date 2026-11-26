@@ -170,6 +170,47 @@ impl AppState {
             }
         }
 
+        if let (Some(cloud_url), Some(api_token)) = (
+            self.config.cloud_url.clone(),
+            self.config.cloud_api_token.clone(),
+        ) {
+            let client = self.http_client.clone();
+            let sig = self.signer.sign_root(&root);
+            let pubkey = self.signer.get_public_key_pem();
+            let sid = session_id.to_string();
+            let payload = serde_json::json!({
+                "sessionId": sid,
+                "merkleRoot": root,
+                "signature": sig,
+                "signingPubkey": pubkey,
+                "status": "ACTIVE",
+                "events": [{
+                    "sequence": event.sequence,
+                    "eventType": event.event_type,
+                    "inputDigest": event.input_digest,
+                    "sanitizedDigest": event.sanitized_digest,
+                    "policyAction": event.policy_action,
+                    "entitiesDetected": event.entities_detected,
+                    "tokensMapped": event.tokens_mapped,
+                    "eventTimestamp": event.timestamp,
+                    "eventHash": event.node_hash,
+                    "prevHash": event.prev_hash,
+                }]
+            });
+            tokio::spawn(async move {
+                let endpoint = format!("{}/api/ingest/events", cloud_url);
+                if let Err(e) = client
+                    .post(&endpoint)
+                    .bearer_auth(&api_token)
+                    .json(&payload)
+                    .send()
+                    .await
+                {
+                    tracing::warn!("Cloud telemetry forward failed: {}", e);
+                }
+            });
+        }
+
         (root, seq)
     }
 }

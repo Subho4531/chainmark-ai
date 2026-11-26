@@ -1,0 +1,31 @@
+# Git & tooling
+.git
+.gitignore
+.impeccable
+.venv
+__pycache__
+*.py[cod]
+
+# Dependencies & build output (rebuilt inside images)
+node_modules
+**/node_modules
+frontend/dist
+target
+dist
+
+# Local secrets and keys
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.sig
+
+# Unused in container builds
+tests
+docs
+design
+images
+chainmark
+*.db
+*.sqlite3

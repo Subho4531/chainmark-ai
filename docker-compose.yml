@@ -1,0 +1,117 @@
+name: chainmark-test
+
+# ===========================================================================
+# Chainmark AI - local test environment
+#
+#   console          http://localhost:8080
+#   rust gateway     http://localhost:8010
+#   cloud API        http://localhost:3002
+#   postgres         localhost:5433
+#
+# Ports are configurable (see .env.docker.example) because the default ports
+# 8000/3001/5432 are often occupied by a local `uv run`/`bun run` dev loop.
+#
+# The values below are TEST-ONLY defaults. Override them with real secrets
+# before exposing this stack to anything beyond your machine.
+# ===========================================================================
+
+x-app-env: &app-env
+  DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:-chainmark_test_pw}@postgres:5432/${POSTGRES_DB:-chainmark}
+  CHAINMARK_MASTER_KEY: ${DOCKER_MASTER_KEY:-50cb277ad2cb09f8a68a764f7032ae18d426c50f39277c963659d6b7f2bd17d8}
+  AUTH_SECRET: ${DOCKER_AUTH_SECRET:-chainmark-test-only-auth-secret-do-not-use-in-production-0001}
+  FAIL_CLOSED: "true"
+  DEPLOYMENT_MODE: cloud
+  NODE_ENV: development
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: chainmark-test-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-chainmark_test_pw}
+      POSTGRES_DB: ${POSTGRES_DB:-chainmark}
+    ports:
+      - "${POSTGRES_PORT:-5433}:5432"
+    volumes:
+      - chainmark_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+    restart: unless-stopped
+
+  # One-shot schema sync. Runs `drizzle-kit push` and exits before the API and
+  # gateway come up, so every container starts against a ready schema.
+  migrate:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    container_name: chainmark-test-migrate
+    command: ["bunx", "drizzle-kit", "push", "--force"]
+    environment: *app-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    container_name: chainmark-test-api
+    environment:
+      <<: *app-env
+      API_PORT: "3001"
+      PORT: "3001"
+    ports:
+      - "${API_HTTP_PORT:-3002}:3001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: chainmark-test-proxy
+    environment:
+      <<: *app-env
+      CHAINMARK_HOST: 0.0.0.0
+      CHAINMARK_PORT: "8000"
+      RUST_LOG: ${RUST_LOG:-info}
+      # Optional: send signed telemetry to the cloud API in this stack.
+      # Needs a cm_live_... website token created from the console.
+      CHAINMARK_CLOUD_URL: ${CHAINMARK_CLOUD_URL:-}
+      CHAINMARK_API_TOKEN: ${CHAINMARK_API_TOKEN:-}
+    ports:
+      - "${PROXY_PORT:-8010}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: chainmark-test-frontend
+    ports:
+      - "${FRONTEND_PORT:-8080}:80"
+    depends_on:
+      api:
+        condition: service_started
+      proxy:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  chainmark_pgdata:
+    name: chainmark_test_pgdata

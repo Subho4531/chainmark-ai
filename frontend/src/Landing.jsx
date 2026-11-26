@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { Link } from './router'
 import FlowField from './FlowField'
 import HeroSeam from './HeroSeam'
 import ScanFlow from './ScanFlow'
@@ -392,8 +393,8 @@ export default function Landing() {
           >
             <GithubMark className="nav-github-icon" />
           </a>
-          <a className="login" href="/dashboard">Log in</a>
-          <a className="signup" href="/dashboard">Sign up</a>
+          <Link className="login" to="/login">Log in</Link>
+          <Link className="signup" to="/signup">Sign up</Link>
           <button
             type="button"
             className="menu-button"
@@ -429,8 +430,8 @@ export default function Landing() {
               <ArrowUpRight className="mobile-arrow" />
             </a>
             <div className="mobile-menu-foot">
-              <a className="login" href="/dashboard">Log in</a>
-              <a className="signup" href="/dashboard">Sign up</a>
+              <Link className="login" to="/login" onClick={() => setMenuOpen(false)}>Log in</Link>
+              <Link className="signup" to="/signup" onClick={() => setMenuOpen(false)}>Sign up</Link>
             </div>
           </div>
         </div>

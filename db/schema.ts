@@ -27,17 +27,78 @@ const bytea = customType<{ data: Buffer; driverData: Buffer }>({
   },
 });
 
-// 1. Sessions Table (Option 2: holds state, Merkle root, ECDSA signature, and signer public key)
-export const sessions = pgTable("sessions", {
-  sessionId: varchar("session_id", { length: 64 }).primaryKey(),
-  status: varchar("status", { length: 32 }).default("ACTIVE").notNull(),
-  merkleRoot: char("merkle_root", { length: 64 }).default("0000000000000000000000000000000000000000000000000000000000000000").notNull(),
-  signature: text("signature"),
-  signingPubkey: text("signing_pubkey"),
-  totalEvents: integer("total_events").default(0).notNull(),
+// 0. Cloud Portal Multi-Tenant Tables (Option 2: Managed Cloud Auth & Billing)
+export const users = pgTable("users", {
+  id: varchar("id", { length: 64 }).primaryKey(),
+  email: varchar("email", { length: 255 }).notNull().unique(),
+  name: varchar("name", { length: 120 }).notNull(),
+  passwordHash: text("password_hash").notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
-  lastActive: timestamp("last_active", { withTimezone: true }).defaultNow().notNull(),
 });
+
+export const organizations = pgTable("organizations", {
+  id: varchar("id", { length: 64 }).primaryKey(),
+  name: varchar("name", { length: 120 }).notNull(),
+  slug: varchar("slug", { length: 80 }).notNull().unique(),
+  plan: varchar("plan", { length: 32 }).default("cloud_usage").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
+export const orgMembers = pgTable(
+  "org_members",
+  {
+    id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+    orgId: varchar("org_id", { length: 64 })
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    userId: varchar("user_id", { length: 64 })
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    role: varchar("role", { length: 32 }).default("owner").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [uniqueIndex("unique_org_member").on(table.orgId, table.userId)]
+);
+
+export const apiKeys = pgTable(
+  "api_keys",
+  {
+    id: varchar("id", { length: 64 }).primaryKey(),
+    orgId: varchar("org_id", { length: 64 })
+      .notNull()
+      .references(() => organizations.id, { onDelete: "cascade" }),
+    createdByUserId: varchar("created_by_user_id", { length: 64 }).references(() => users.id, {
+      onDelete: "set null",
+    }),
+    name: varchar("name", { length: 120 }).notNull(),
+    prefix: varchar("prefix", { length: 24 }).notNull(),
+    keyHash: char("key_hash", { length: 64 }).notNull().unique(),
+    scopes: jsonb("scopes").$type<string[]>().default(["intercept"]).notNull(),
+    status: varchar("status", { length: 16 }).default("active").notNull(),
+    lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [index("idx_api_keys_org_status").on(table.orgId, table.status)]
+);
+
+// 1. Sessions Table (Option 2: holds org scope, state, Merkle root, ECDSA signature, and signer public key)
+export const sessions = pgTable(
+  "sessions",
+  {
+    sessionId: varchar("session_id", { length: 64 }).primaryKey(),
+    orgId: varchar("org_id", { length: 64 }).references(() => organizations.id, {
+      onDelete: "set null",
+    }),
+    status: varchar("status", { length: 32 }).default("ACTIVE").notNull(),
+    merkleRoot: char("merkle_root", { length: 64 }).default("0000000000000000000000000000000000000000000000000000000000000000").notNull(),
+    signature: text("signature"),
+    signingPubkey: text("signing_pubkey"),
+    totalEvents: integer("total_events").default(0).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    lastActive: timestamp("last_active", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [index("idx_sessions_org_active").on(table.orgId, table.lastActive)]
+);
 
 // 2. Vault Records (Encrypted tokens with AES-256-GCM)
 export const vaultRecords = pgTable(
@@ -97,7 +158,39 @@ export const evidencePacks = pgTable("evidence_packs", {
 });
 
 // Relations
-export const sessionsRelations = relations(sessions, ({ many }) => ({
+export const organizationsRelations = relations(organizations, ({ many }) => ({
+  members: many(orgMembers),
+  apiKeys: many(apiKeys),
+  sessions: many(sessions),
+}));
+
+export const usersRelations = relations(users, ({ many }) => ({
+  memberships: many(orgMembers),
+}));
+
+export const orgMembersRelations = relations(orgMembers, ({ one }) => ({
+  organization: one(organizations, {
+    fields: [orgMembers.orgId],
+    references: [organizations.id],
+  }),
+  user: one(users, {
+    fields: [orgMembers.userId],
+    references: [users.id],
+  }),
+}));
+
+export const apiKeysRelations = relations(apiKeys, ({ one }) => ({
+  organization: one(organizations, {
+    fields: [apiKeys.orgId],
+    references: [organizations.id],
+  }),
+}));
+
+export const sessionsRelations = relations(sessions, ({ one, many }) => ({
+  organization: one(organizations, {
+    fields: [sessions.orgId],
+    references: [organizations.id],
+  }),
   vaultRecords: many(vaultRecords),
   merkleEvents: many(merkleEvents),
   evidencePacks: many(evidencePacks),
@@ -125,6 +218,12 @@ export const evidencePacksRelations = relations(evidencePacks, ({ one }) => ({
 }));
 
 // Inferred TypeScript Types
+export type User = typeof users.$inferSelect;
+export type NewUser = typeof users.$inferInsert;
+export type Organization = typeof organizations.$inferSelect;
+export type NewOrganization = typeof organizations.$inferInsert;
+export type OrgMember = typeof orgMembers.$inferSelect;
+export type ApiKey = typeof apiKeys.$inferSelect;
 export type Session = typeof sessions.$inferSelect;
 export type NewSession = typeof sessions.$inferInsert;
 export type VaultRecord = typeof vaultRecords.$inferSelect;

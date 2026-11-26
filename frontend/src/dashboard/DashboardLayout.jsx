@@ -3,6 +3,7 @@ import {
   BookOpen,
   KeyRound,
   LayoutGrid,
+  LogOut,
   Menu,
   Plus,
   Search,
@@ -10,7 +11,8 @@ import {
   X,
 } from 'lucide-react'
 import { Link } from '../router'
-import { usePath } from '../routerState'
+import { usePath, navigate } from '../routerState'
+import { useAuth } from '../auth/AuthContext'
 import { markSrc, markSrcSet } from '../logo'
 import Overview from './Overview'
 import Playground from './Playground'
@@ -39,19 +41,39 @@ function normalize(path) {
   return path
 }
 
+function initialsFor(name, email) {
+  const src = (name || email || 'CM').trim()
+  const parts = src.split(/\s+/)
+  if (parts.length >= 2) {
+    return `${parts[0][0]}${parts[1][0]}`.toUpperCase()
+  }
+  return src.slice(0, 2).toUpperCase()
+}
+
 export default function DashboardLayout() {
   const path = usePath()
   const route = normalize(path)
   const Page = PAGES[route] ?? Overview
   const [navOpen, setNavOpen] = useState(false)
+  const [menuOpen, setMenuOpen] = useState(false)
+  const { user, org, billing, logout } = useAuth()
 
   useEffect(() => {
     const onKey = (event) => {
-      if (event.key === 'Escape') setNavOpen(false)
+      if (event.key === 'Escape') {
+        setNavOpen(false)
+        setMenuOpen(false)
+      }
     }
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
   }, [])
+
+  const handleLogout = async () => {
+    setMenuOpen(false)
+    await logout()
+    navigate('/login')
+  }
 
   return (
     <div className="dash">
@@ -99,9 +121,9 @@ export default function DashboardLayout() {
             <kbd>/</kbd>
           </label>
 
-          <span className="dash-chain-chip" title="Evidence chain verified against the sealed ledgers">
-            <span className="dash-chain-key">chain</span>
-            <span className="dash-chain-value">verified · 4182</span>
+          <span className="dash-chain-chip" title="Cloud audit events stored for this workspace">
+            <span className="dash-chain-key">cloud</span>
+            <span className="dash-chain-value">{billing?.eventsStored ?? 0} events</span>
           </span>
 
           <Link className="dash-btn dash-btn-primary dash-cta" to="/playground">
@@ -109,13 +131,35 @@ export default function DashboardLayout() {
             New session
           </Link>
 
-          <button type="button" className="dash-user" aria-label="Account: subho@acme.dev">
-            <span className="dash-avatar">SB</span>
-            <span className="dash-user-text">
-              <strong>subho@acme.dev</strong>
-              <span>acme · production</span>
-            </span>
-          </button>
+          <div className="dash-user-wrap">
+            <button
+              type="button"
+              className="dash-user"
+              aria-label={`Account: ${user?.email || 'operator'}`}
+              aria-expanded={menuOpen}
+              onClick={() => setMenuOpen((open) => !open)}
+            >
+              <span className="dash-avatar">{initialsFor(user?.name, user?.email)}</span>
+              <span className="dash-user-text">
+                <strong>{user?.email || 'operator'}</strong>
+                <span>{org?.slug || 'workspace'} · cloud</span>
+              </span>
+            </button>
+            {menuOpen ? (
+              <div className="dash-user-menu" role="menu">
+                <div className="dash-user-menu-meta">
+                  <strong>{org?.name}</strong>
+                  <span>
+                    {org?.role} · {billing?.sessionsCount ?? 0} sessions
+                  </span>
+                </div>
+                <button type="button" className="dash-user-logout" onClick={handleLogout}>
+                  <LogOut size={14} />
+                  Sign out
+                </button>
+              </div>
+            ) : null}
+          </div>
 
           <button
             type="button"

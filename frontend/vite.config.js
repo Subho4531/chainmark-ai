@@ -16,6 +16,26 @@ export default defineConfig({
         target: 'http://localhost:8000',
         changeOrigin: true,
       },
+      '/api/auth': {
+        target: 'http://localhost:3001',
+        changeOrigin: true,
+      },
+      '/api/keys': {
+        target: 'http://localhost:3001',
+        changeOrigin: true,
+      },
+      '/api/analytics': {
+        target: 'http://localhost:3001',
+        changeOrigin: true,
+      },
+      '/api/ingest': {
+        target: 'http://localhost:3001',
+        changeOrigin: true,
+      },
+      '/api/cloud': {
+        target: 'http://localhost:3001',
+        changeOrigin: true,
+      },
       '/api': {
         target: 'http://localhost:8000',
         changeOrigin: true,
